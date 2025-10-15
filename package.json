@@ -1,0 +1,21 @@
+{
+  "name": "edu.uconn.i3.archivesaccess",
+  "version": "1.0.0",
+  "displayName": "Archives Access",
+  "description": "A Unity Editor plugin for accessing and displaying metadata from digital archives collections.",
+  "unity": "2021.3",
+  "keywords": [
+    "editor",
+    "archives",
+    "metadata",
+    "tool"
+  ],
+  "author": {
+    "name": "Brian Daley",
+    "email": "brian@uconn.edu",
+    "url": "https://i3.uconn.edu"
+  },
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  }
+}

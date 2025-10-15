@@ -1,0 +1,6 @@
+# Unity generated meta files
+*.meta
+
+# OS files
+.DS_Store
+Thumbs.db
