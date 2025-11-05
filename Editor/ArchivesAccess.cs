@@ -8,6 +8,163 @@ using UnityEngine.Video;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
+// Component to hold references to archive assets
+public class ArchiveAssetReference : MonoBehaviour
+{
+    [System.Serializable]
+    public class AssetReference
+    {
+        public string assetPath;
+        public string assetType;
+        public UnityEngine.Object assetObject;
+    }
+    
+    public List<AssetReference> attachments = new List<AssetReference>();
+}
+
+public class AssetSelectionWindow : EditorWindow
+{
+    private List<AttachmentInfo> _attachments;
+    private string _assetName;
+    private string _apiUrl;
+    private System.Action<string, string, string, string, int> _onAssetSelected;
+    private ListView _listView;
+
+    public class AttachmentInfo
+    {
+        public string Url { get; set; }
+        public string Title { get; set; }
+        public string MimeType { get; set; }
+        public int Index { get; set; }
+    }
+
+    public static void ShowWindow(List<AttachmentInfo> attachments, string assetName, string apiUrl, System.Action<string, string, string, string, int> onAssetSelected)
+    {
+        var window = GetWindow<AssetSelectionWindow>("Select Asset to Import");
+        window.minSize = new Vector2(400, 300);
+        window._attachments = attachments;
+        window._assetName = assetName;
+        window._apiUrl = apiUrl;
+        window._onAssetSelected = onAssetSelected;
+        window.BuildUI(); // Build UI after setting data
+        window.ShowModal();
+    }
+
+    public void CreateGUI()
+    {
+        // CreateGUI is called automatically, but we'll build UI in BuildUI() after data is set
+    }
+
+    private void BuildUI()
+    {
+        // Clear any existing content
+        rootVisualElement.Clear();
+
+        Debug.Log($"BuildUI called with {_attachments?.Count ?? 0} attachments for asset: {_assetName}");
+
+        var root = rootVisualElement;
+        root.style.paddingTop = 10;
+        root.style.paddingBottom = 10;
+        root.style.paddingLeft = 10;
+        root.style.paddingRight = 10;
+
+        var label = new Label($"Select an asset to import for: {_assetName}");
+        label.style.fontSize = 14;
+        label.style.marginBottom = 10;
+        label.style.unityFontStyleAndWeight = FontStyle.Bold;
+        root.Add(label);
+
+        var infoLabel = new Label($"Found {_attachments?.Count ?? 0} attachment(s). Click an item to import it.");
+        infoLabel.style.marginBottom = 10;
+        root.Add(infoLabel);
+
+        // Create list view
+        _listView = new ListView();
+        _listView.style.flexGrow = 1;
+        _listView.selectionType = SelectionType.Single;
+        _listView.itemsSource = _attachments;
+        _listView.fixedItemHeight = 60;
+        
+        _listView.makeItem = () =>
+        {
+            var container = new VisualElement();
+            container.style.flexDirection = FlexDirection.Column;
+            container.style.paddingTop = 5;
+            container.style.paddingBottom = 5;
+            container.style.paddingLeft = 10;
+            container.style.paddingRight = 10;
+            
+            var titleLabel = new Label();
+            titleLabel.style.fontSize = 12;
+            titleLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            
+            var typeLabel = new Label();
+            typeLabel.style.fontSize = 10;
+            typeLabel.style.color = new Color(0.6f, 0.6f, 0.6f);
+            
+            container.Add(titleLabel);
+            container.Add(typeLabel);
+            
+            return container;
+        };
+        
+        _listView.bindItem = (element, index) =>
+        {
+            if (_attachments == null || index < 0 || index >= _attachments.Count)
+            {
+                Debug.LogWarning($"Invalid bindItem: index={index}, attachments count={_attachments?.Count ?? 0}");
+                return;
+            }
+
+            var attachment = _attachments[index];
+            var titleLabel = element.Q<Label>();
+            var typeLabel = element.ElementAt(1) as Label;
+            
+            if (titleLabel != null)
+                titleLabel.text = attachment.Title;
+            if (typeLabel != null)
+                typeLabel.text = $"Type: {attachment.MimeType}";
+            
+            Debug.Log($"Bound item {index}: {attachment.Title}");
+        };
+
+        root.Add(_listView);
+
+        // Force rebuild the list view
+        _listView.Rebuild();
+
+        // Buttons container
+        var buttonContainer = new VisualElement();
+        buttonContainer.style.flexDirection = FlexDirection.Row;
+        buttonContainer.style.justifyContent = Justify.FlexEnd;
+        buttonContainer.style.marginTop = 10;
+
+        var cancelButton = new Button(() => Close()) { text = "Cancel" };
+        cancelButton.style.marginRight = 5;
+        buttonContainer.Add(cancelButton);
+
+        var importButton = new Button(OnImportClicked) { text = "Import Selected" };
+        buttonContainer.Add(importButton);
+
+        root.Add(buttonContainer);
+    }
+
+    private void OnImportClicked()
+    {
+        if (_listView.selectedIndex >= 0 && _listView.selectedIndex < _attachments.Count)
+        {
+            var selected = _attachments[_listView.selectedIndex];
+            string downloadEndpoint = _apiUrl + "download?url=" + selected.Url;
+            _onAssetSelected?.Invoke(_assetName, downloadEndpoint, selected.Title, selected.MimeType, selected.Index);
+            Close();
+        }
+        else
+        {
+            EditorUtility.DisplayDialog("No Selection", "Please select an asset to import.", "OK");
+        }
+    }
+}
+
 public class ArchivesAccess : EditorWindow
 {
     public const string titleContentText = "Archives Access";
@@ -118,16 +275,33 @@ public class ArchivesAccess : EditorWindow
 
         splitView.Add(bottomPane);
 
-        TextField assetURL = new TextField("Asset URL");
-        assetURL.textEdition.placeholder = "https://collections.ctdigitalarchive.org/node/1686854";
-        assetURL.value = "https://collections.ctdigitalarchive.org/node/947297";
-        assetURL.style.marginBottom = 10;
-        assetURL.textEdition.hidePlaceholderOnFocus = true;
+        // Example URLs for different content types
+        var exampleUrls = new Dictionary<string, string>
+        {
+            { "Use PDF Demo URL", "https://collections.ctdigitalarchive.org/node/144961" },
+            { "Use Image Demo URL", "https://collections.ctdigitalarchive.org/node/947297" },
+            { "Use Video Demo URL", "https://collections.ctdigitalarchive.org/node/745225" },
+            { "Use Audio Demo URL", "https://collections.ctdigitalarchive.org/node/2316120" }
+        };
+
+        // Create dropdown for asset selection
+        var assetDropdown = new DropdownField("Asset URL", 
+            exampleUrls.Keys.ToList(),
+            "Use Image Demo URL");
+        assetDropdown.style.marginBottom = 10;
+
+        // Store the selected URL
+        string selectedUrl = exampleUrls["Use Image Demo URL"];
+        assetDropdown.RegisterValueChangedCallback(evt =>
+        {
+            selectedUrl = exampleUrls[evt.newValue];
+            Debug.Log($"Selected {evt.newValue}: {selectedUrl}");
+        });
 
         Button downloadButton = new Button(() =>
         {
             Debug.Log("Button pressed!");
-            string fetchEndpoint = apiUrl + "parse?url=" + assetURL.value.Trim();
+            string fetchEndpoint = apiUrl + "parse?url=" + selectedUrl.Trim();
             Debug.Log("Fetching data from API: " + fetchEndpoint);
             var fetchTask = FetchDataFromAPI(fetchEndpoint);
             
@@ -192,7 +366,7 @@ public class ArchivesAccess : EditorWindow
         rootVisualElement.style.paddingRight = 10;
         rootVisualElement.style.paddingTop = 10;
         rootVisualElement.style.paddingLeft = 10;
-        topPane.Add(assetURL);
+        topPane.Add(assetDropdown);
         topPane.Add(downloadButton);
     }
 
@@ -218,7 +392,7 @@ public class ArchivesAccess : EditorWindow
     {
         // Disable the button to prevent multiple clicks
         _generateButton.SetEnabled(false);
-        _generateButton.text = "Generating...";
+        _generateButton.text = "Opening Selection...";
 
         try
         {
@@ -240,75 +414,89 @@ public class ArchivesAccess : EditorWindow
                 }
             }
 
-            // Store downloaded asset info
-            var downloadedAssets = new System.Collections.Generic.List<(string path, string mimeType, int index)>();
-
-            // Process attachments if available - download first, create GameObject after
-        if (_apiResponse?.data?.attachments != null)
-        {
-            var attachments = _apiResponse.data.attachments as JArray;
-            if (attachments != null && attachments.Count > 0)
+            // Collect attachment info and show selection window
+            if (_apiResponse?.data?.attachments != null)
             {
-                Debug.Log($"Found {attachments.Count} attachment(s), downloading...");
-                
-                for (int i = 0; i < attachments.Count; i++)
+                var attachments = _apiResponse.data.attachments as JArray;
+                if (attachments != null && attachments.Count > 0)
                 {
-                    var attachment = attachments[i];
-                    string url = attachment["url"]?.ToString();
-                    string title = attachment["title"]?.ToString() ?? $"Attachment_{i}";
-                    var typeArray = attachment["type"] as JArray;
-                    string mimeType = typeArray != null && typeArray.Count > 0 
-                        ? string.Join("/", typeArray) 
-                        : "application/octet-stream";
-
-                    if (!string.IsNullOrEmpty(url))
+                    var attachmentList = new List<AssetSelectionWindow.AttachmentInfo>();
+                    
+                    for (int i = 0; i < attachments.Count; i++)
                     {
-                        string downloadEndpoint = apiUrl + "download?url=" + url;
-                        string assetPath = await DownloadAttachment(name, downloadEndpoint, title, mimeType, i);
+                        var attachment = attachments[i];
+                        string url = attachment["url"]?.ToString();
+                        string title = attachment["title"]?.ToString() ?? $"Attachment_{i}";
+                        var typeArray = attachment["type"] as JArray;
+                        string mimeType = typeArray != null && typeArray.Count > 0 
+                            ? string.Join("/", typeArray) 
+                            : "application/octet-stream";
+
+                        if (!string.IsNullOrEmpty(url))
+                        {
+                            attachmentList.Add(new AssetSelectionWindow.AttachmentInfo
+                            {
+                                Url = url,
+                                Title = title,
+                                MimeType = mimeType,
+                                Index = i
+                            });
+                        }
+                    }
+
+                    // Show selection window
+                    AssetSelectionWindow.ShowWindow(attachmentList, name, apiUrl, async (assetName, downloadEndpoint, title, mimeType, index) =>
+                    {
+                        // This callback is executed when user selects an asset
+                        _generateButton.SetEnabled(false);
+                        _generateButton.text = "Generating...";
+
+                        string assetPath = await DownloadAttachment(assetName, downloadEndpoint, title, mimeType, index);
                         
                         if (!string.IsNullOrEmpty(assetPath))
                         {
-                            downloadedAssets.Add((assetPath, mimeType, i));
+                            // Create the GameObject with undo support
+                            var go = new GameObject(assetName);
+                            Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
+                            go.transform.position = Vector3.zero;
+                            
+                            Debug.Log($"Generated GameObject for asset: {assetName}");
+                            
+                            // Attach the downloaded asset to the GameObject
+                            AttachAssetToGameObject(go, assetPath, mimeType, index);
+                            
+                            // Mark the scene as dirty so the object persists
+                            EditorSceneManager.MarkSceneDirty(go.scene);
+                            
+                            // Select and focus on the new GameObject
+                            Selection.activeGameObject = go;
+                            EditorGUIUtility.PingObject(go);
                         }
-                    }
+                        else
+                        {
+                            Debug.LogWarning($"Asset download failed, GameObject not created.");
+                        }
+
+                        _generateButton.SetEnabled(true);
+                        _generateButton.text = "Generate Asset";
+                    });
+                }
+                else
+                {
+                    Debug.LogWarning("No attachments found.");
                 }
             }
-        }
-
-        // Only create GameObject if we have downloaded assets
-        if (downloadedAssets.Count > 0)
-        {
-            // Create the GameObject with undo support
-            var go = new GameObject(name);
-            Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
-            go.transform.position = Vector3.zero;
-            
-            Debug.Log($"Generated GameObject for asset: {name}");
-            
-            // Attach all downloaded assets to the GameObject
-            foreach (var (assetPath, mimeType, index) in downloadedAssets)
+            else
             {
-                AttachAssetToGameObject(go, assetPath, mimeType, index);
+                Debug.LogWarning("No attachments available in API response.");
             }
-            
-            // Mark the scene as dirty so the object persists
-            EditorSceneManager.MarkSceneDirty(go.scene);
-            
-            // Select and focus on the new GameObject
-            Selection.activeGameObject = go;
-            EditorGUIUtility.PingObject(go);
         }
-        else
+        finally
         {
-            Debug.LogWarning($"No assets were downloaded, GameObject not created.");
+            // Re-enable the button when selection window opens
+            _generateButton.SetEnabled(true);
+            _generateButton.text = "Generate Asset";
         }
-            }
-            finally
-            {
-                // Re-enable the button when done (success or failure)
-                _generateButton.SetEnabled(true);
-                _generateButton.text = "Generate Asset";
-            }
     }
 
     private async System.Threading.Tasks.Task<string> DownloadAttachment(string assetName, string url, string title, string mimeType, int index)
@@ -343,9 +531,9 @@ public class ArchivesAccess : EditorWindow
                     string extension = GetExtensionFromMimeType(actualMimeType);
                     Debug.Log($"Final MIME type: {actualMimeType}, extension: {extension}");
                     
-                    // Clean title for filename
-                    string safeTitle = System.IO.Path.GetInvalidFileNameChars()
-                        .Aggregate(title, (current, c) => current.Replace(c, '_'));
+                    // Clean title for filename - remove all invalid characters
+                    string safeTitle = SanitizeFileName(title);
+                    string safeAssetName = SanitizeFileName(assetName);
                     
                     // Create Assets folder structure
                     string folderPath = "Assets/ArchiveAssets";
@@ -354,16 +542,17 @@ public class ArchivesAccess : EditorWindow
                         UnityEditor.AssetDatabase.CreateFolder("Assets", "ArchiveAssets");
                     }
 
-                    string parentFolderName = assetName.Replace(" ", "_");
-                    string parentFolderPath = $"{folderPath}/{parentFolderName}";
+                    string parentFolderPath = $"{folderPath}/{safeAssetName}";
                     if (!UnityEditor.AssetDatabase.IsValidFolder(parentFolderPath))
                     {
-                        UnityEditor.AssetDatabase.CreateFolder(folderPath, parentFolderName);
+                        UnityEditor.AssetDatabase.CreateFolder(folderPath, safeAssetName);
                     }
 
                     string filename = $"{safeTitle}_{index}{extension}";
                     string assetPath = $"{parentFolderPath}/{filename}";
                     string tempPath = assetPath + ".download"; // temp path to avoid importer races
+
+                    Debug.Log($"Downloading to: {assetPath}");
 
                     // Write to temp file first to avoid sharing violations
                     SafeWriteAllBytes(tempPath, bytes);
@@ -399,7 +588,16 @@ public class ArchivesAccess : EditorWindow
         var dir = System.IO.Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
         {
-            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                System.IO.Directory.CreateDirectory(dir);
+                Debug.Log($"Created directory: {dir}");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Failed to create directory '{dir}': {ex.Message}");
+                throw;
+            }
         }
         
         // Write with retry in case of transient locks
@@ -409,12 +607,22 @@ public class ArchivesAccess : EditorWindow
             try
             {
                 System.IO.File.WriteAllBytes(path, bytes);
+                Debug.Log($"Successfully wrote {bytes.Length} bytes to: {path}");
                 return;
             }
-            catch (System.IO.IOException)
+            catch (System.IO.IOException ioEx)
             {
-                if (i == attempts - 1) throw;
+                if (i == attempts - 1)
+                {
+                    Debug.LogError($"Failed to write file after {attempts} attempts: {ioEx.Message}");
+                    throw;
+                }
                 System.Threading.Thread.Sleep(50);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Unexpected error writing file '{path}': {ex.GetType().Name} - {ex.Message}");
+                throw;
             }
         }
     }
@@ -460,6 +668,48 @@ public class ArchivesAccess : EditorWindow
         }
     }
 
+    private string SanitizeFileName(string filename)
+    {
+        if (string.IsNullOrEmpty(filename))
+            return "Untitled";
+
+        // Get invalid characters for both path and filename
+        var invalidChars = System.IO.Path.GetInvalidFileNameChars()
+            .Concat(System.IO.Path.GetInvalidPathChars())
+            .Distinct()
+            .ToArray();
+
+        // Replace invalid characters with underscore
+        string safe = invalidChars.Aggregate(filename, (current, c) => current.Replace(c, '_'));
+
+        // Also replace some additional problematic characters
+        safe = safe.Replace(":", "_")
+                   .Replace("/", "_")
+                   .Replace("\\", "_")
+                   .Replace("|", "_")
+                   .Replace("?", "_")
+                   .Replace("*", "_")
+                   .Replace("\"", "_")
+                   .Replace("<", "_")
+                   .Replace(">", "_")
+                   .Replace("\n", "_")
+                   .Replace("\r", "_")
+                   .Replace("\t", "_");
+
+        // Remove leading/trailing spaces and dots (Windows doesn't like these)
+        safe = safe.Trim(' ', '.');
+
+        // Ensure it's not empty after sanitization
+        if (string.IsNullOrEmpty(safe))
+            return "Untitled";
+
+        // Limit length to avoid path too long errors (Windows MAX_PATH is 260)
+        if (safe.Length > 100)
+            safe = safe.Substring(0, 100);
+
+        return safe;
+    }
+
     private string GetExtensionFromMimeType(string mimeType)
     {
         // Common MIME type to extension mapping
@@ -471,6 +721,9 @@ public class ArchivesAccess : EditorWindow
             { "image/png", ".png" },
             { "image/gif", ".gif" },
             { "image/bmp", ".bmp" },
+            { "image/jp2", ".jp2" },
+            { "image/jpx", ".jp2" },
+            { "image/jpm", ".jpm" },
             { "video/mp4", ".mp4" },
             { "video/mpeg", ".mpeg" },
             { "video/quicktime", ".mov" },
@@ -478,6 +731,7 @@ public class ArchivesAccess : EditorWindow
             { "video/webm", ".webm" },
             { "audio/mpeg", ".mp3" },
             { "audio/wav", ".wav" },
+            { "audio/x-wav", ".wav" },
             { "audio/ogg", ".ogg" },
             { "text/plain", ".txt" },
             { "text/html", ".html" },
@@ -499,6 +753,7 @@ public class ArchivesAccess : EditorWindow
 
         // Extract filename without extension for display
         string filename = System.IO.Path.GetFileNameWithoutExtension(assetPath);
+        string extension = System.IO.Path.GetExtension(assetPath).ToLower();
 
         // Handle different asset types
         if (asset is Texture2D texture)
@@ -513,7 +768,7 @@ public class ArchivesAccess : EditorWindow
             spriteRenderer.sprite = sprite;
             
             Undo.RegisterCreatedObjectUndo(imageGO, "Add Image Attachment");
-            Debug.Log($"Attached image as SpriteRenderer: {filename}");
+            Debug.Log($"Attached image as SpriteRenderer: {filename} ({texture.width}x{texture.height})");
         }
         else if (asset is VideoClip videoClip)
         {
@@ -536,12 +791,27 @@ public class ArchivesAccess : EditorWindow
             audioSource.clip = audioClip;
             audioSource.playOnAwake = false;
             
-            Debug.Log($"Attached audio as AudioSource: {filename}");
+            Debug.Log($"Attached audio as AudioSource: {filename} (length: {audioClip.length}s)");
         }
         else
         {
-            // For other types (PDF, text, etc.), just log the reference
-            Debug.Log($"Attachment saved but not automatically attached to scene (type: {asset.GetType().Name}): {assetPath}");
+            // For PDFs and other non-standard Unity types, add reference to ArchiveAssetReference component
+            var assetRef = parent.GetComponent<ArchiveAssetReference>();
+            if (assetRef == null)
+            {
+                assetRef = parent.AddComponent<ArchiveAssetReference>();
+            }
+            
+            assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
+            {
+                assetPath = assetPath,
+                assetType = extension,
+                assetObject = asset
+            });
+            
+            EditorUtility.SetDirty(parent);
+            
+            Debug.Log($"Attached {extension.ToUpper()} file reference: {filename} (Path: {assetPath})");
         }
     }
 }
