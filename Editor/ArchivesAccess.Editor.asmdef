@@ -1,16 +1,17 @@
 {
     "name": "ArchivesAccess.Editor",
     "rootNamespace": "",
-    "references": [
-        "Unity.Nuget.Newtonsoft-Json"
-    ],
+    "references": [],
     "includePlatforms": [
         "Editor"
     ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "System.Text.Json.dll",
+        "Spire.Pdf.dll"
+    ],
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],

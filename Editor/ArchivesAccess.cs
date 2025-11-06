@@ -1,12 +1,13 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.IO.Compression;
+using System.Text.Json;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.UIElements;
 using UnityEngine.Video;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 
 // Component to hold references to archive assets
 public class ArchiveAssetReference : MonoBehaviour
@@ -171,7 +172,7 @@ public class ArchivesAccess : EditorWindow
     MultiColumnListView _table;
     List<MetadataItem> _metadataItems = new List<MetadataItem>();
     Button _generateButton;
-    dynamic _apiResponse; // Store full API response including attachments
+    JsonElement _apiResponse; // Store full API response including attachments
 
     string apiUrl = "http://127.0.0.1:8000/api/";
 
@@ -318,33 +319,43 @@ public class ArchivesAccess : EditorWindow
 
                     _metadataItems.Clear();
                     
-                    // Parse the JSON response
-                    var jsonResponse = Newtonsoft.Json.JsonConvert.DeserializeObject<dynamic>(task.Result);
-                    _apiResponse = jsonResponse; // Store for later use in GenerateAsset
-                    if (jsonResponse?.data?.meta != null)
+                    // Parse the JSON response using System.Text.Json
+                    try
                     {
-                        var metaData = jsonResponse.data.meta;
-                        foreach (JProperty property in metaData)
+                        using (var doc = JsonDocument.Parse(task.Result))
                         {
-                            var val = "";
-                            if (property.Value is JArray array)
+                            _apiResponse = doc.RootElement.Clone(); // Store for later use in GenerateAsset
+                            
+                            if (doc.RootElement.TryGetProperty("data", out var data) &&
+                                data.TryGetProperty("meta", out var metaData))
                             {
-                                foreach (var item in array)
+                                foreach (var property in metaData.EnumerateObject())
                                 {
-                                    val += item.ToString() + "\n";
+                                    var val = "";
+                                    if (property.Value.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var item in property.Value.EnumerateArray())
+                                        {
+                                            val += item.ToString() + "\n";
+                                        }
+                                    }
+                                    else
+                                    {
+                                        val = property.Value.ToString();
+                                    }
+
+                                    _metadataItems.Add(new MetadataItem 
+                                    { 
+                                        PropertyName = property.Name, 
+                                        PropertyValue = val 
+                                    });
                                 }
                             }
-                            else
-                            {
-                                val = property.Value.ToString();
-                            }
-
-                            _metadataItems.Add(new MetadataItem 
-                            { 
-                                PropertyName = property.Name, 
-                                PropertyValue = val 
-                            });
                         }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError($"Failed to parse JSON response: {ex.Message}");
                     }
                     
                     _table.RefreshItems();
@@ -415,34 +426,45 @@ public class ArchivesAccess : EditorWindow
             }
 
             // Collect attachment info and show selection window
-            if (_apiResponse?.data?.attachments != null)
+            if (_apiResponse.ValueKind != JsonValueKind.Undefined &&
+                _apiResponse.TryGetProperty("data", out var data) &&
+                data.TryGetProperty("attachments", out var attachments) &&
+                attachments.ValueKind == JsonValueKind.Array)
             {
-                var attachments = _apiResponse.data.attachments as JArray;
-                if (attachments != null && attachments.Count > 0)
+                var attachmentList = new List<AssetSelectionWindow.AttachmentInfo>();
+                
+                int i = 0;
+                foreach (var attachment in attachments.EnumerateArray())
                 {
-                    var attachmentList = new List<AssetSelectionWindow.AttachmentInfo>();
+                    string url = attachment.TryGetProperty("url", out var urlProp) ? urlProp.GetString() : "";
+                    string title = attachment.TryGetProperty("title", out var titleProp) ? titleProp.GetString() : $"Attachment_{i}";
                     
-                    for (int i = 0; i < attachments.Count; i++)
+                    string mimeType = "application/octet-stream";
+                    if (attachment.TryGetProperty("type", out var typeArray) && typeArray.ValueKind == JsonValueKind.Array)
                     {
-                        var attachment = attachments[i];
-                        string url = attachment["url"]?.ToString();
-                        string title = attachment["title"]?.ToString() ?? $"Attachment_{i}";
-                        var typeArray = attachment["type"] as JArray;
-                        string mimeType = typeArray != null && typeArray.Count > 0 
-                            ? string.Join("/", typeArray) 
-                            : "application/octet-stream";
-
-                        if (!string.IsNullOrEmpty(url))
+                        var parts = new List<string>();
+                        foreach (var item in typeArray.EnumerateArray())
                         {
-                            attachmentList.Add(new AssetSelectionWindow.AttachmentInfo
-                            {
-                                Url = url,
-                                Title = title,
-                                MimeType = mimeType,
-                                Index = i
-                            });
+                            parts.Add(item.GetString() ?? "");
                         }
+                        mimeType = string.Join("/", parts);
                     }
+
+                    if (!string.IsNullOrEmpty(url))
+                    {
+                        attachmentList.Add(new AssetSelectionWindow.AttachmentInfo
+                        {
+                            Url = url,
+                            Title = title,
+                            MimeType = mimeType,
+                            Index = i
+                        });
+                    }
+                    i++;
+                }
+                
+                if (attachmentList.Count > 0)
+                {
 
                     // Show selection window
                     AssetSelectionWindow.ShowWindow(attachmentList, name, apiUrl, async (assetName, downloadEndpoint, title, mimeType, index) =>
@@ -745,116 +767,153 @@ public class ArchivesAccess : EditorWindow
 
     private void AttachAssetToGameObject(GameObject parent, string assetPath, string mimeType, int index)
     {
-        var asset = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetPath);
-        
+        // Extract filename without extension for display
+        string filename = Path.GetFileNameWithoutExtension(assetPath);
+        string extension = Path.GetExtension(assetPath).ToLowerInvariant();
+
+        // Special handling: backend now returns ZIP of JPEG pages instead of a PDF.
+        if (extension == ".pdf")
+        {
+            try
+            {
+                byte[] pdfBytes = File.ReadAllBytes(assetPath);
+                bool looksZip = pdfBytes.Length > 4 && pdfBytes[0] == 'P' && pdfBytes[1] == 'K';
+                if (looksZip)
+                {
+                    Debug.Log($"PDF asset at '{assetPath}' identified as ZIP of pages. Extracting...");
+                    string parentFolder = Path.GetDirectoryName(assetPath);
+                    string pagesFolder = Path.Combine(parentFolder, filename + "_pages");
+                    if (!Directory.Exists(pagesFolder)) Directory.CreateDirectory(pagesFolder);
+
+                    using (var ms = new MemoryStream(pdfBytes))
+                    using (var archive = new ZipArchive(ms, ZipArchiveMode.Read))
+                    {
+                        int pageIndex = 0;
+                        foreach (var entry in archive.Entries)
+                        {
+                            if (entry.Length == 0) continue; // skip directories
+                            string entryExt = Path.GetExtension(entry.Name).ToLowerInvariant();
+                            if (entryExt != ".jpg" && entryExt != ".jpeg" && entryExt != ".png") continue;
+
+                            string safeEntryName = SanitizeFileName(Path.GetFileNameWithoutExtension(entry.Name)) + entryExt;
+                            string outPath = Path.Combine(pagesFolder, safeEntryName);
+
+                            // Avoid overwrite: if exists, append index
+                            if (File.Exists(outPath))
+                            {
+                                outPath = Path.Combine(pagesFolder, safeEntryName.Replace(entryExt, "_" + pageIndex + entryExt));
+                            }
+
+                            using (var es = entry.Open())
+                            using (var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write))
+                            {
+                                es.CopyTo(fs);
+                            }
+
+                            // Import and create sprite GameObject
+                            string unityPath = outPath.Replace("\\", "/").Replace(Application.dataPath, "Assets");
+                            // If path is under Assets folder already, ensure unityPath relative
+                            if (!unityPath.StartsWith("Assets"))
+                            {
+                                // Convert absolute to relative if extraction ended up absolute
+                                int assetsIndex = outPath.IndexOf("Assets");
+                                if (assetsIndex >= 0) unityPath = outPath.Substring(assetsIndex).Replace("\\", "/");
+                            }
+                            AssetDatabase.ImportAsset(unityPath, ImportAssetOptions.ForceUpdate);
+                            var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(unityPath);
+                            if (tex != null)
+                            {
+                                var pageGO = new GameObject($"Page {pageIndex + 1}: {filename}");
+                                pageGO.transform.SetParent(parent.transform);
+                                pageGO.transform.localPosition = new Vector3(pageIndex * 0.5f, 0, 0); // slight offset
+                                var sr = pageGO.AddComponent<SpriteRenderer>();
+                                var sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
+                                sr.sprite = sprite;
+                                Undo.RegisterCreatedObjectUndo(pageGO, "Add PDF Page Sprite");
+                                Debug.Log($"Imported PDF page {pageIndex + 1}: {unityPath}");
+
+                                // Track reference
+                                var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
+                                assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
+                                {
+                                    assetPath = unityPath,
+                                    assetType = ".jpg",
+                                    assetObject = tex
+                                });
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"Failed to load extracted page as Texture2D: {unityPath}");
+                            }
+                            pageIndex++;
+                        }
+                        if (pageIndex == 0)
+                        {
+                            Debug.LogWarning("ZIP (from PDF) contained no image pages to import.");
+                        }
+                    }
+                    return; // Done handling PDF-zip
+                }
+                else
+                {
+                    Debug.Log("PDF does not appear to be a ZIP. Storing reference only.");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Failed extracting PDF pages from '{assetPath}': {ex.Message}");
+            }
+        }
+
+        // Load asset normally for non-PDF types
+        var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetPath);
         if (asset == null)
         {
             Debug.LogWarning($"Could not load asset at {assetPath}");
             return;
         }
 
-        // Extract filename without extension for display
-        string filename = System.IO.Path.GetFileNameWithoutExtension(assetPath);
-        string extension = System.IO.Path.GetExtension(assetPath).ToLower();
-
-        // Handle different asset types
         if (asset is Texture2D texture)
         {
-            // Create a child GameObject with a SpriteRenderer or UI Image
             var imageGO = new GameObject($"Image: {filename}");
             imageGO.transform.SetParent(parent.transform);
             imageGO.transform.localPosition = Vector3.zero;
-            
             var spriteRenderer = imageGO.AddComponent<SpriteRenderer>();
             var sprite = Sprite.Create(texture, new Rect(0, 0, texture.width, texture.height), new Vector2(0.5f, 0.5f));
             spriteRenderer.sprite = sprite;
-            
             Undo.RegisterCreatedObjectUndo(imageGO, "Add Image Attachment");
             Debug.Log($"Attached image as SpriteRenderer: {filename} ({texture.width}x{texture.height})");
         }
         else if (asset is VideoClip videoClip)
         {
-            // Create a child GameObject with VideoPlayer and a quad to display it
             var videoGO = new GameObject($"Video: {filename}");
             videoGO.transform.SetParent(parent.transform);
             videoGO.transform.localPosition = Vector3.zero;
-            
-            // Create RenderTexture for video output
-            var renderTexture = new RenderTexture((int)videoClip.width, (int)videoClip.height, 0);
-            renderTexture.name = $"{filename}_RenderTexture";
-            
-            // Save the RenderTexture as an asset
-            string rtPath = System.IO.Path.GetDirectoryName(assetPath) + $"/{filename}_RT.renderTexture";
-            UnityEditor.AssetDatabase.CreateAsset(renderTexture, rtPath);
-            
-            // Configure VideoPlayer
             var videoPlayer = videoGO.AddComponent<UnityEngine.Video.VideoPlayer>();
             videoPlayer.clip = videoClip;
             videoPlayer.playOnAwake = false;
-            videoPlayer.isLooping = true;
-            videoPlayer.renderMode = UnityEngine.Video.VideoRenderMode.RenderTexture;
-            videoPlayer.targetTexture = renderTexture;
-            videoPlayer.audioOutputMode = UnityEngine.Video.VideoAudioOutputMode.AudioSource;
-            
-            // Add AudioSource for video audio
-            var audioSource = videoGO.AddComponent<AudioSource>();
-            videoPlayer.SetTargetAudioSource(0, audioSource);
-            
-            // Create a Quad to display the video
-            var quadGO = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            quadGO.name = "Video Display";
-            quadGO.transform.SetParent(videoGO.transform);
-            quadGO.transform.localPosition = Vector3.zero;
-            
-            // Calculate aspect ratio and scale the quad
-            float aspectRatio = videoClip.width / (float)videoClip.height;
-            float displayHeight = 3f; // 3 units tall
-            float displayWidth = displayHeight * aspectRatio;
-            quadGO.transform.localScale = new Vector3(displayWidth, displayHeight, 1f);
-            
-            // Create and assign material with the render texture
-            var material = new Material(Shader.Find("Unlit/Texture"));
-            material.mainTexture = renderTexture;
-            quadGO.GetComponent<Renderer>().material = material;
-            
-            // Save the material as an asset
-            string matPath = System.IO.Path.GetDirectoryName(assetPath) + $"/{filename}_Material.mat";
-            UnityEditor.AssetDatabase.CreateAsset(material, matPath);
-            
             Undo.RegisterCreatedObjectUndo(videoGO, "Add Video Attachment");
-            Undo.RegisterCreatedObjectUndo(quadGO, "Add Video Display");
-            
-            Debug.Log($"Attached video as VideoPlayer with display: {filename} ({videoClip.width}x{videoClip.height}, {videoClip.length:F2}s)");
-            Debug.Log($"Video controls: Select the '{videoGO.name}' object and use the VideoPlayer component to play/pause");
+            Debug.Log($"Attached video as VideoPlayer: {filename}");
         }
         else if (asset is AudioClip audioClip)
         {
-            // Add AudioSource to parent
             var audioSource = parent.AddComponent<AudioSource>();
             audioSource.clip = audioClip;
             audioSource.playOnAwake = false;
-            
             Debug.Log($"Attached audio as AudioSource: {filename} (length: {audioClip.length}s)");
         }
         else
         {
-            // For PDFs and other non-standard Unity types, add reference to ArchiveAssetReference component
-            var assetRef = parent.GetComponent<ArchiveAssetReference>();
-            if (assetRef == null)
-            {
-                assetRef = parent.AddComponent<ArchiveAssetReference>();
-            }
-            
+            // Fallback: store reference for unsupported but imported assets (e.g., text/json)
+            var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
             assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
             {
                 assetPath = assetPath,
                 assetType = extension,
                 assetObject = asset
             });
-            
             EditorUtility.SetDirty(parent);
-            
-            Debug.Log($"Attached {extension.ToUpper()} file reference: {filename} (Path: {assetPath})");
+            Debug.Log($"Stored reference for asset type {extension}: {filename}");
         }
     }
 }
