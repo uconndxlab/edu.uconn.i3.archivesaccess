@@ -388,7 +388,7 @@ public class ArchivesAccess : EditorWindow
         }
     }
 
-    private async void GenerateAsset()
+    private void GenerateAsset()
     {
         // Disable the button to prevent multiple clicks
         _generateButton.SetEnabled(false);
@@ -511,20 +511,22 @@ public class ArchivesAccess : EditorWindow
                     response.EnsureSuccessStatusCode();
                     var bytes = await response.Content.ReadAsByteArrayAsync();
 
-                    // Try to get MIME type from response header if the provided one doesn't work
+                    // Always prefer MIME type from HTTP response header over API metadata
+                    // The actual response is the authoritative source for what the file really is
                     string actualMimeType = mimeType;
-                    if (response.Content.Headers.ContentType != null)
+                    if (response.Content.Headers.ContentType != null && 
+                        !string.IsNullOrEmpty(response.Content.Headers.ContentType.MediaType))
                     {
                         string headerMimeType = response.Content.Headers.ContentType.MediaType;
-                        Debug.Log($"MIME type from API: {mimeType}, from response header: {headerMimeType}");
+                        Debug.Log($"MIME type from API metadata: {mimeType}, from HTTP response: {headerMimeType}");
                         
-                        // Use header MIME type if the provided one would result in .dat
-                        string testExt = GetExtensionFromMimeType(mimeType);
-                        if (testExt == ".dat" && !string.IsNullOrEmpty(headerMimeType))
-                        {
-                            actualMimeType = headerMimeType;
-                            Debug.Log($"Using MIME type from header: {headerMimeType}");
-                        }
+                        // Always use the HTTP response MIME type as it's authoritative
+                        actualMimeType = headerMimeType;
+                        Debug.Log($"Using MIME type from HTTP response: {headerMimeType}");
+                    }
+                    else
+                    {
+                        Debug.Log($"No Content-Type in HTTP response, using API metadata: {mimeType}");
                     }
 
                     // Determine file extension from MIME type
@@ -772,17 +774,58 @@ public class ArchivesAccess : EditorWindow
         }
         else if (asset is VideoClip videoClip)
         {
-            // Create a child GameObject with VideoPlayer
+            // Create a child GameObject with VideoPlayer and a quad to display it
             var videoGO = new GameObject($"Video: {filename}");
             videoGO.transform.SetParent(parent.transform);
             videoGO.transform.localPosition = Vector3.zero;
             
+            // Create RenderTexture for video output
+            var renderTexture = new RenderTexture((int)videoClip.width, (int)videoClip.height, 0);
+            renderTexture.name = $"{filename}_RenderTexture";
+            
+            // Save the RenderTexture as an asset
+            string rtPath = System.IO.Path.GetDirectoryName(assetPath) + $"/{filename}_RT.renderTexture";
+            UnityEditor.AssetDatabase.CreateAsset(renderTexture, rtPath);
+            
+            // Configure VideoPlayer
             var videoPlayer = videoGO.AddComponent<UnityEngine.Video.VideoPlayer>();
             videoPlayer.clip = videoClip;
             videoPlayer.playOnAwake = false;
+            videoPlayer.isLooping = true;
+            videoPlayer.renderMode = UnityEngine.Video.VideoRenderMode.RenderTexture;
+            videoPlayer.targetTexture = renderTexture;
+            videoPlayer.audioOutputMode = UnityEngine.Video.VideoAudioOutputMode.AudioSource;
+            
+            // Add AudioSource for video audio
+            var audioSource = videoGO.AddComponent<AudioSource>();
+            videoPlayer.SetTargetAudioSource(0, audioSource);
+            
+            // Create a Quad to display the video
+            var quadGO = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            quadGO.name = "Video Display";
+            quadGO.transform.SetParent(videoGO.transform);
+            quadGO.transform.localPosition = Vector3.zero;
+            
+            // Calculate aspect ratio and scale the quad
+            float aspectRatio = videoClip.width / (float)videoClip.height;
+            float displayHeight = 3f; // 3 units tall
+            float displayWidth = displayHeight * aspectRatio;
+            quadGO.transform.localScale = new Vector3(displayWidth, displayHeight, 1f);
+            
+            // Create and assign material with the render texture
+            var material = new Material(Shader.Find("Unlit/Texture"));
+            material.mainTexture = renderTexture;
+            quadGO.GetComponent<Renderer>().material = material;
+            
+            // Save the material as an asset
+            string matPath = System.IO.Path.GetDirectoryName(assetPath) + $"/{filename}_Material.mat";
+            UnityEditor.AssetDatabase.CreateAsset(material, matPath);
             
             Undo.RegisterCreatedObjectUndo(videoGO, "Add Video Attachment");
-            Debug.Log($"Attached video as VideoPlayer: {filename}");
+            Undo.RegisterCreatedObjectUndo(quadGO, "Add Video Display");
+            
+            Debug.Log($"Attached video as VideoPlayer with display: {filename} ({videoClip.width}x{videoClip.height}, {videoClip.length:F2}s)");
+            Debug.Log($"Video controls: Select the '{videoGO.name}' object and use the VideoPlayer component to play/pause");
         }
         else if (asset is AudioClip audioClip)
         {
