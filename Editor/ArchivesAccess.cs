@@ -156,6 +156,10 @@ public class AssetSelectionWindow : EditorWindow
         {
             var selected = _attachments[_listView.selectedIndex];
             string downloadEndpoint = _apiUrl + "download?url=" + selected.Url;
+            
+            // Show initial progress bar
+            EditorUtility.DisplayProgressBar("Importing Asset", $"Preparing to download: {selected.Title}", 0f);
+            
             _onAssetSelected?.Invoke(_assetName, downloadEndpoint, selected.Title, selected.MimeType, selected.Index);
             Close();
         }
@@ -473,34 +477,48 @@ public class ArchivesAccess : EditorWindow
                         _generateButton.SetEnabled(false);
                         _generateButton.text = "Generating...";
 
-                        string assetPath = await DownloadAttachment(assetName, downloadEndpoint, title, mimeType, index);
-                        
-                        if (!string.IsNullOrEmpty(assetPath))
+                        try
                         {
-                            // Create the GameObject with undo support
-                            var go = new GameObject(assetName);
-                            Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
-                            go.transform.position = Vector3.zero;
+                            EditorUtility.DisplayProgressBar("Importing Asset", $"Downloading: {title}", 0.3f);
+                            string assetPath = await DownloadAttachment(assetName, downloadEndpoint, title, mimeType, index);
                             
-                            Debug.Log($"Generated GameObject for asset: {assetName}");
-                            
-                            // Attach the downloaded asset to the GameObject
-                            AttachAssetToGameObject(go, assetPath, mimeType, index);
-                            
-                            // Mark the scene as dirty so the object persists
-                            EditorSceneManager.MarkSceneDirty(go.scene);
-                            
-                            // Select and focus on the new GameObject
-                            Selection.activeGameObject = go;
-                            EditorGUIUtility.PingObject(go);
+                            if (!string.IsNullOrEmpty(assetPath))
+                            {
+                                EditorUtility.DisplayProgressBar("Importing Asset", $"Creating GameObject: {assetName}", 0.7f);
+                                
+                                // Create the GameObject with undo support
+                                var go = new GameObject(assetName);
+                                Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
+                                go.transform.position = Vector3.zero;
+                                
+                                Debug.Log($"Generated GameObject for asset: {assetName}");
+                                
+                                EditorUtility.DisplayProgressBar("Importing Asset", $"Attaching assets to GameObject", 0.85f);
+                                
+                                // Attach the downloaded asset to the GameObject
+                                AttachAssetToGameObject(go, assetPath, mimeType, index);
+                                
+                                // Mark the scene as dirty so the object persists
+                                EditorSceneManager.MarkSceneDirty(go.scene);
+                                
+                                // Select and focus on the new GameObject
+                                Selection.activeGameObject = go;
+                                EditorGUIUtility.PingObject(go);
+                                
+                                EditorUtility.DisplayProgressBar("Importing Asset", "Complete!", 1f);
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"Asset download failed, GameObject not created.");
+                            }
                         }
-                        else
+                        finally
                         {
-                            Debug.LogWarning($"Asset download failed, GameObject not created.");
+                            // Always clear the progress bar
+                            EditorUtility.ClearProgressBar();
+                            _generateButton.SetEnabled(true);
+                            _generateButton.text = "Generate Asset";
                         }
-
-                        _generateButton.SetEnabled(true);
-                        _generateButton.text = "Generate Asset";
                     });
                 }
                 else
