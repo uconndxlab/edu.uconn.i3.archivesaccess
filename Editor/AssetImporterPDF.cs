@@ -4,6 +4,16 @@ using System;
 using System.IO;
 using System.Linq;
 
+// Currently uses Spire.PDF to render PDF pages to JPEG images via reflection.
+// @todo: look into aspose.pdf, maui.pdf or ImageSharp
+
+// PDFtoImage A free library that uses the PDFium rendering engine (the same one used in Google Chrome) and the SkiaSharp cross-platform graphics API to convert PDFs to images. It is compatible with .NET (Core) and .NET Framework.
+// Ghostscript.NET	This library is a managed wrapper for the Ghostscript library, a powerful, open-source interpreter for PostScript and PDF files. You can use it to convert PDFs to images by calling the Ghostscript library from your C# code.
+// iText7	A powerful library for PDF manipulation that includes conversion capabilities. While it is free, it may have a steeper learning curve and a larger footprint than other options if you only need PDF-to-image conversion, says Microsoft Learn.
+// PdfiumSharp	A library that allows you to use the Pdfium library to render PDF pages into images. It can be combined with PDFsharp if you need to read or manipulate PDF files.
+// Debenu PDF	Offers a free lite version with a lightweight footprint and good documentation for basic PDF editing and conversion.
+
+
 [ScriptedImporter(1, "pdf")] // Register this importer for files with the .pdf extension, version 1
 public class ImageImporterPDF : ScriptedImporter
 {
