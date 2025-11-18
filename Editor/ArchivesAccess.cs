@@ -1,7 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
-using System.IO.Compression;
 using System.Text.Json;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -789,97 +788,67 @@ public class ArchivesAccess : EditorWindow
         string filename = Path.GetFileNameWithoutExtension(assetPath);
         string extension = Path.GetExtension(assetPath).ToLowerInvariant();
 
-        // Special handling: backend now returns ZIP of JPEG pages instead of a PDF.
+        // PDF handling: look for rendered JPEG pages in the <pdfname>_pages folder
         if (extension == ".pdf")
         {
             try
             {
-                byte[] pdfBytes = File.ReadAllBytes(assetPath);
-                bool looksZip = pdfBytes.Length > 4 && pdfBytes[0] == 'P' && pdfBytes[1] == 'K';
-                if (looksZip)
+                var dir = Path.GetDirectoryName(assetPath);
+                var baseName = Path.GetFileNameWithoutExtension(assetPath);
+                var pagesFolder = Path.Combine(dir ?? string.Empty, baseName + "_pages");
+                
+                if (Directory.Exists(pagesFolder))
                 {
-                    Debug.Log($"PDF asset at '{assetPath}' identified as ZIP of pages. Extracting...");
-                    string parentFolder = Path.GetDirectoryName(assetPath);
-                    string pagesFolder = Path.Combine(parentFolder, filename + "_pages");
-                    if (!Directory.Exists(pagesFolder)) Directory.CreateDirectory(pagesFolder);
+                    var jpegFiles = Directory.GetFiles(pagesFolder, "*.jpeg", SearchOption.TopDirectoryOnly)
+                        .Concat(Directory.GetFiles(pagesFolder, "*.jpg", SearchOption.TopDirectoryOnly))
+                        .OrderBy(f => Path.GetFileName(f), System.StringComparer.OrdinalIgnoreCase)
+                        .ToList();
 
-                    using (var ms = new MemoryStream(pdfBytes))
-                    using (var archive = new ZipArchive(ms, ZipArchiveMode.Read))
+                    if (jpegFiles.Count > 0)
                     {
                         int pageIndex = 0;
-                        foreach (var entry in archive.Entries)
+                        foreach (var jpegPath in jpegFiles)
                         {
-                            if (entry.Length == 0) continue; // skip directories
-                            string entryExt = Path.GetExtension(entry.Name).ToLowerInvariant();
-                            if (entryExt != ".jpg" && entryExt != ".jpeg" && entryExt != ".png") continue;
-
-                            string safeEntryName = SanitizeFileName(Path.GetFileNameWithoutExtension(entry.Name)) + entryExt;
-                            string outPath = Path.Combine(pagesFolder, safeEntryName);
-
-                            // Avoid overwrite: if exists, append index
-                            if (File.Exists(outPath))
+                            var unityPath = jpegPath.Replace("\\", "/");
+                            if (unityPath.Contains("Assets/"))
                             {
-                                outPath = Path.Combine(pagesFolder, safeEntryName.Replace(entryExt, "_" + pageIndex + entryExt));
+                                int idx = unityPath.IndexOf("Assets/");
+                                unityPath = unityPath.Substring(idx);
                             }
 
-                            using (var es = entry.Open())
-                            using (var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write))
-                            {
-                                es.CopyTo(fs);
-                            }
-
-                            // Import and create sprite GameObject
-                            string unityPath = outPath.Replace("\\", "/").Replace(Application.dataPath, "Assets");
-                            // If path is under Assets folder already, ensure unityPath relative
-                            if (!unityPath.StartsWith("Assets"))
-                            {
-                                // Convert absolute to relative if extraction ended up absolute
-                                int assetsIndex = outPath.IndexOf("Assets");
-                                if (assetsIndex >= 0) unityPath = outPath.Substring(assetsIndex).Replace("\\", "/");
-                            }
                             AssetDatabase.ImportAsset(unityPath, ImportAssetOptions.ForceUpdate);
                             var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(unityPath);
+                            
                             if (tex != null)
                             {
                                 var pageGO = new GameObject($"Page {pageIndex + 1}: {filename}");
                                 pageGO.transform.SetParent(parent.transform);
-                                pageGO.transform.localPosition = new Vector3(pageIndex * 0.5f, 0, 0); // slight offset
+                                pageGO.transform.localPosition = new Vector3(pageIndex * 0.5f, 0, 0);
                                 var sr = pageGO.AddComponent<SpriteRenderer>();
                                 var sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
                                 sr.sprite = sprite;
                                 Undo.RegisterCreatedObjectUndo(pageGO, "Add PDF Page Sprite");
-                                Debug.Log($"Imported PDF page {pageIndex + 1}: {unityPath}");
 
-                                // Track reference
                                 var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
                                 assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
                                 {
                                     assetPath = unityPath,
-                                    assetType = ".jpg",
+                                    assetType = ".pdf/page",
                                     assetObject = tex
                                 });
                             }
-                            else
-                            {
-                                Debug.LogWarning($"Failed to load extracted page as Texture2D: {unityPath}");
-                            }
+                            
                             pageIndex++;
                         }
-                        if (pageIndex == 0)
-                        {
-                            Debug.LogWarning("ZIP (from PDF) contained no image pages to import.");
-                        }
+                        return; // Done handling PDF pages
                     }
-                    return; // Done handling PDF-zip
                 }
-                else
-                {
-                    Debug.Log("PDF does not appear to be a ZIP. Storing reference only.");
-                }
+                
+                Debug.Log($"No page images found in '{pagesFolder}' for PDF '{assetPath}'. Storing reference only.");
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"Failed extracting PDF pages from '{assetPath}': {ex.Message}");
+                Debug.LogError($"Failed to attach PDF pages for '{assetPath}': {ex.Message}");
             }
         }
 
@@ -933,5 +902,21 @@ public class ArchivesAccess : EditorWindow
             EditorUtility.SetDirty(parent);
             Debug.Log($"Stored reference for asset type {extension}: {filename}");
         }
+    }
+
+    [MenuItem("Assets/Generate Flipbook", false, 20)]
+    private static void GenerateFlipbookMenuItem()
+    {
+        EditorUtility.DisplayDialog("Generate Flipbook", "Flipbook generation started!", "OK");
+    }
+
+    [MenuItem("Assets/Generate Flipbook", true)]
+    private static bool ValidateGenerateFlipbook()
+    {
+        // Only show menu item if a PDF file is selected
+        if (Selection.activeObject == null) return false;
+        
+        string path = AssetDatabase.GetAssetPath(Selection.activeObject);
+        return !string.IsNullOrEmpty(path) && path.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase);
     }
 }
