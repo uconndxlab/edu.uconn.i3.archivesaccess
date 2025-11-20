@@ -10,7 +10,7 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "System.Text.Json.dll",
-        "Spire.Pdf.dll"
+        "PDFiumSharp.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

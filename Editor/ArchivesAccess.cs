@@ -788,68 +788,11 @@ public class ArchivesAccess : EditorWindow
         string filename = Path.GetFileNameWithoutExtension(assetPath);
         string extension = Path.GetExtension(assetPath).ToLowerInvariant();
 
-        // PDF handling: look for rendered JPEG pages in the <pdfname>_pages folder
+        // Skip PDF files - they don't create GameObjects
         if (extension == ".pdf")
         {
-            try
-            {
-                var dir = Path.GetDirectoryName(assetPath);
-                var baseName = Path.GetFileNameWithoutExtension(assetPath);
-                var pagesFolder = Path.Combine(dir ?? string.Empty, baseName + "_pages");
-                
-                if (Directory.Exists(pagesFolder))
-                {
-                    var jpegFiles = Directory.GetFiles(pagesFolder, "*.jpeg", SearchOption.TopDirectoryOnly)
-                        .Concat(Directory.GetFiles(pagesFolder, "*.jpg", SearchOption.TopDirectoryOnly))
-                        .OrderBy(f => Path.GetFileName(f), System.StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-
-                    if (jpegFiles.Count > 0)
-                    {
-                        int pageIndex = 0;
-                        foreach (var jpegPath in jpegFiles)
-                        {
-                            var unityPath = jpegPath.Replace("\\", "/");
-                            if (unityPath.Contains("Assets/"))
-                            {
-                                int idx = unityPath.IndexOf("Assets/");
-                                unityPath = unityPath.Substring(idx);
-                            }
-
-                            AssetDatabase.ImportAsset(unityPath, ImportAssetOptions.ForceUpdate);
-                            var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(unityPath);
-                            
-                            if (tex != null)
-                            {
-                                var pageGO = new GameObject($"Page {pageIndex + 1}: {filename}");
-                                pageGO.transform.SetParent(parent.transform);
-                                pageGO.transform.localPosition = new Vector3(pageIndex * 0.5f, 0, 0);
-                                var sr = pageGO.AddComponent<SpriteRenderer>();
-                                var sprite = Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f));
-                                sr.sprite = sprite;
-                                Undo.RegisterCreatedObjectUndo(pageGO, "Add PDF Page Sprite");
-
-                                var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
-                                assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
-                                {
-                                    assetPath = unityPath,
-                                    assetType = ".pdf/page",
-                                    assetObject = tex
-                                });
-                            }
-                            
-                            pageIndex++;
-                        }
-                        return; // Done handling PDF pages
-                    }
-                }
-                
-                Debug.Log($"No page images found in '{pagesFolder}' for PDF '{assetPath}'. Storing reference only.");
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogError($"Failed to attach PDF pages for '{assetPath}': {ex.Message}");
-            }
+            Debug.Log($"PDF file imported: {assetPath} (no GameObject created)");
+            return;
         }
 
         // Load asset normally for non-PDF types
