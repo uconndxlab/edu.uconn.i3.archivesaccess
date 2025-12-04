@@ -9,8 +9,7 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "System.Text.Json.dll",
-        "PDFiumSharp.dll"
+        "System.Text.Json.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

@@ -465,7 +465,20 @@ public class ArchivesAccess : EditorWindow
                     }
                     i++;
                 }
-                
+                // If the API returned a set of individual images for this PDF, offer a special
+                // "PDF as Images" import option that will download each image separately.
+                if (data.TryGetProperty("images", out var imagesProp) && imagesProp.ValueKind == JsonValueKind.Array && imagesProp.GetArrayLength() > 0)
+                {
+                    // Insert at front so it's visible as a primary option
+                    attachmentList.Insert(0, new AssetSelectionWindow.AttachmentInfo
+                    {
+                        Url = "",
+                        Title = "PDF as Images",
+                        MimeType = "pdf-images",
+                        Index = -1
+                    });
+                }
+
                 if (attachmentList.Count > 0)
                 {
 
@@ -478,37 +491,71 @@ public class ArchivesAccess : EditorWindow
 
                         try
                         {
-                            EditorUtility.DisplayProgressBar("Importing Asset", $"Downloading: {title}", 0.3f);
-                            string assetPath = await DownloadAttachment(assetName, downloadEndpoint, title, mimeType, index);
-                            
-                            if (!string.IsNullOrEmpty(assetPath))
+                            if (mimeType == "pdf-images")
                             {
-                                EditorUtility.DisplayProgressBar("Importing Asset", $"Creating GameObject: {assetName}", 0.7f);
-                                
-                                // Create the GameObject with undo support
-                                var go = new GameObject(assetName);
-                                Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
-                                go.transform.position = Vector3.zero;
-                                
-                                Debug.Log($"Generated GameObject for asset: {assetName}");
-                                
-                                EditorUtility.DisplayProgressBar("Importing Asset", $"Attaching assets to GameObject", 0.85f);
-                                
-                                // Attach the downloaded asset to the GameObject
-                                AttachAssetToGameObject(go, assetPath, mimeType, index);
-                                
-                                // Mark the scene as dirty so the object persists
-                                EditorSceneManager.MarkSceneDirty(go.scene);
-                                
-                                // Select and focus on the new GameObject
-                                Selection.activeGameObject = go;
-                                EditorGUIUtility.PingObject(go);
-                                
-                                EditorUtility.DisplayProgressBar("Importing Asset", "Complete!", 1f);
+                                // Special case: download each image in data.images and attach them
+                                EditorUtility.DisplayProgressBar("Importing Asset", $"Downloading PDF images: {title}", 0.3f);
+                                var assetPaths = await DownloadPdfImages(assetName);
+
+                                if (assetPaths != null && assetPaths.Count > 0)
+                                {
+                                    EditorUtility.DisplayProgressBar("Importing Asset", $"Creating GameObject: {assetName}", 0.7f);
+
+                                    var go = new GameObject(assetName);
+                                    Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
+                                    go.transform.position = Vector3.zero;
+
+                                    Debug.Log($"Generated GameObject for asset: {assetName}");
+
+                                    EditorUtility.DisplayProgressBar("Importing Asset", $"Attaching {assetPaths.Count} images to GameObject", 0.85f);
+
+                                    for (int a = 0; a < assetPaths.Count; a++)
+                                    {
+                                        var path = assetPaths[a];
+                                        AttachAssetToGameObject(go, path, "image/jpeg", a);
+                                    }
+
+                                    EditorSceneManager.MarkSceneDirty(go.scene);
+                                    Selection.activeGameObject = go;
+                                    EditorGUIUtility.PingObject(go);
+                                }
+                                else
+                                {
+                                    Debug.LogWarning("No images were downloaded for PDF as Images option.");
+                                }
                             }
                             else
                             {
-                                Debug.LogWarning($"Asset download failed, GameObject not created.");
+                                EditorUtility.DisplayProgressBar("Importing Asset", $"Downloading: {title}", 0.3f);
+                                string assetPath = await DownloadAttachment(assetName, downloadEndpoint, title, mimeType, index);
+
+                                if (!string.IsNullOrEmpty(assetPath))
+                                {
+                                    EditorUtility.DisplayProgressBar("Importing Asset", $"Creating GameObject: {assetName}", 0.7f);
+
+                                    // Create the GameObject with undo support
+                                    var go = new GameObject(assetName);
+                                    Undo.RegisterCreatedObjectUndo(go, "Generate Archive Asset");
+                                    go.transform.position = Vector3.zero;
+
+                                    Debug.Log($"Generated GameObject for asset: {assetName}");
+
+                                    EditorUtility.DisplayProgressBar("Importing Asset", $"Attaching assets to GameObject", 0.85f);
+
+                                    // Attach the downloaded asset to the GameObject
+                                    AttachAssetToGameObject(go, assetPath, mimeType, index);
+
+                                    // Mark the scene as dirty so the object persists
+                                    EditorSceneManager.MarkSceneDirty(go.scene);
+
+                                    // Select and focus on the new GameObject
+                                    Selection.activeGameObject = go;
+                                    EditorGUIUtility.PingObject(go);
+                                }
+                                else
+                                {
+                                    Debug.LogWarning($"Asset download failed, GameObject not created.");
+                                }
                             }
                         }
                         finally
@@ -605,6 +652,31 @@ public class ArchivesAccess : EditorWindow
                     if (System.IO.File.Exists(assetPath))
                     {
                         UnityEditor.AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                        // Attach API metadata to the imported asset using AssetImporter.userData
+                        try
+                        {
+                            var metaJson = GetMetadataUserData();
+                            var importer = AssetImporter.GetAtPath(assetPath);
+                            if (importer != null)
+                            {
+                                importer.userData = metaJson ?? "";
+                                UnityEditor.AssetDatabase.WriteImportSettingsIfDirty(assetPath);
+                            }
+                        }
+                        catch (System.Exception exMeta)
+                        {
+                            Debug.LogWarning($"Failed to write userData for {assetPath}: {exMeta.Message}");
+                        }
+                                
+                                // Also create a ScriptableObject next to the imported asset to hold metadata and source URL
+                                try
+                                {
+                                    CreateAndSaveMetadataSO(assetPath, url);
+                                }
+                                catch (System.Exception exSo)
+                                {
+                                    Debug.LogWarning($"Failed to create metadata SO for {assetPath}: {exSo.Message}");
+                                }
                     }
 
                     Debug.Log($"Downloaded and saved: {assetPath} ({bytes.Length} bytes, {mimeType})");
@@ -617,6 +689,243 @@ public class ArchivesAccess : EditorWindow
         {
             Debug.LogError($"Failed to download attachment from {url}: {ex.Message}");
             return null;
+        }
+    }
+
+    // Download each image URL listed in `data.images` and save them into the asset folder
+    private async System.Threading.Tasks.Task<List<string>> DownloadPdfImages(string assetName)
+    {
+        var savedPaths = new List<string>();
+        try
+        {
+            if (_apiResponse.ValueKind == JsonValueKind.Undefined) return savedPaths;
+            if (!_apiResponse.TryGetProperty("data", out var data)) return savedPaths;
+            if (!data.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array) return savedPaths;
+
+            int count = images.GetArrayLength();
+            if (count == 0) return savedPaths;
+
+            int pad = 4; // zero-pad to 4 digits: 0001, 0002, ...
+            string safeAssetName = SanitizeFileName(assetName);
+
+            // Prepare folders
+            string folderPath = "Assets/ArchiveAssets";
+            if (!UnityEditor.AssetDatabase.IsValidFolder(folderPath))
+            {
+                UnityEditor.AssetDatabase.CreateFolder("Assets", "ArchiveAssets");
+            }
+            string parentFolderPath = $"{folderPath}/{safeAssetName}";
+            if (!UnityEditor.AssetDatabase.IsValidFolder(parentFolderPath))
+            {
+                UnityEditor.AssetDatabase.CreateFolder(folderPath, safeAssetName);
+            }
+
+            using (var client = new System.Net.Http.HttpClient())
+            {
+                int idx = 0;
+                foreach (var img in images.EnumerateArray())
+                {
+                    idx++;
+                    string imageUrl = null;
+
+                    // Primary: if the image entry is a string, use it
+                    if (img.ValueKind == JsonValueKind.String)
+                    {
+                        imageUrl = img.GetString();
+                    }
+                    else if (img.ValueKind == JsonValueKind.Object)
+                    {
+                        // Preferred nested path: data.images[].images[0].resource.@id
+                        if (img.TryGetProperty("images", out var innerImages) && innerImages.ValueKind == JsonValueKind.Array && innerImages.GetArrayLength() > 0)
+                        {
+                            var first = innerImages[0];
+                            if (first.ValueKind == JsonValueKind.Object)
+                            {
+                                if (first.TryGetProperty("resource", out var resource) && resource.ValueKind == JsonValueKind.Object)
+                                {
+                                    if (resource.TryGetProperty("@id", out var idProp) && idProp.ValueKind == JsonValueKind.String)
+                                    {
+                                        imageUrl = idProp.GetString();
+                                    }
+                                }
+
+                                // Fallback: first.images[0] may contain a direct "url" field
+                                if (string.IsNullOrEmpty(imageUrl) && first.TryGetProperty("url", out var urlProp) && urlProp.ValueKind == JsonValueKind.String)
+                                {
+                                    imageUrl = urlProp.GetString();
+                                }
+                            }
+                        }
+
+                        // Secondary fallback: entry may have a top-level resource.@id
+                        if (string.IsNullOrEmpty(imageUrl) && img.TryGetProperty("resource", out var topResource) && topResource.ValueKind == JsonValueKind.Object)
+                        {
+                            if (topResource.TryGetProperty("@id", out var topId) && topId.ValueKind == JsonValueKind.String)
+                            {
+                                imageUrl = topId.GetString();
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(imageUrl))
+                    {
+                        Debug.LogWarning($"Skipping image entry #{idx} — no usable URL found in data.images entry.");
+                        continue;
+                    }
+
+                    try
+                    {
+                        using (var response = await client.GetAsync(imageUrl))
+                        {
+                            response.EnsureSuccessStatusCode();
+                            var bytes = await response.Content.ReadAsByteArrayAsync();
+                            string actualMime = response.Content.Headers.ContentType?.MediaType ?? "image/jpeg";
+                            string ext = GetExtensionFromMimeType(actualMime);
+
+                            string filename = idx.ToString().PadLeft(pad, '0') + ext;
+                            string assetPath = $"{parentFolderPath}/{filename}";
+                            string tempPath = assetPath + ".download";
+
+                            SafeWriteAllBytes(tempPath, bytes);
+                            TryReplaceWithRetry(tempPath, assetPath, 10, 50);
+
+                            if (System.IO.File.Exists(assetPath))
+                            {
+                                UnityEditor.AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                                // Attach API metadata to the imported asset using AssetImporter.userData
+                                try
+                                {
+                                    var metaJson = GetMetadataUserData();
+                                    var importer = AssetImporter.GetAtPath(assetPath);
+                                    if (importer != null)
+                                    {
+                                        importer.userData = metaJson ?? "";
+                                        UnityEditor.AssetDatabase.WriteImportSettingsIfDirty(assetPath);
+                                    }
+                                }
+                                catch (System.Exception exMeta)
+                                {
+                                    Debug.LogWarning($"Failed to write userData for {assetPath}: {exMeta.Message}");
+                                }
+
+                                savedPaths.Add(assetPath);
+                                // Create ScriptableObject metadata next to the imported image
+                                try
+                                {
+                                    CreateAndSaveMetadataSO(assetPath, imageUrl);
+                                }
+                                catch (System.Exception exSo)
+                                {
+                                    Debug.LogWarning($"Failed to create metadata SO for {assetPath}: {exSo.Message}");
+                                }
+                            }
+                        }
+                    }
+                    catch (System.Exception exInner)
+                    {
+                        Debug.LogWarning($"Failed to download image {imageUrl}: {exInner.Message}");
+                        // continue with remaining images
+                    }
+                }
+            }
+
+            return savedPaths;
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"Error while downloading PDF images: {ex.Message}");
+            return savedPaths;
+        }
+    }
+
+    // Extract metadata JSON from the stored API response. Prefer `data.meta` when available.
+    private string GetMetadataUserData()
+    {
+        try
+        {
+            if (_apiResponse.ValueKind != JsonValueKind.Undefined && _apiResponse.TryGetProperty("data", out var data))
+            {
+                if (data.TryGetProperty("meta", out var meta))
+                {
+                    return meta.GetRawText();
+                }
+                // If no meta object, store the whole `data` block
+                return data.GetRawText();
+            }
+
+            if (_apiResponse.ValueKind != JsonValueKind.Undefined)
+            {
+                return _apiResponse.GetRawText();
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"Failed to extract metadata for userData: {ex.Message}");
+        }
+
+        return "";
+    }
+
+    // Build a userData JSON string that includes the original source URL plus the metadata
+    private string BuildUserData(string sourceUrl)
+    {
+        try
+        {
+            var metaJson = GetMetadataUserData();
+            // Serialize sourceUrl safely
+            var srcJson = System.Text.Json.JsonSerializer.Serialize(sourceUrl ?? "");
+
+            if (string.IsNullOrEmpty(metaJson))
+            {
+                return "{\"sourceUrl\":" + srcJson + "}";
+            }
+
+            // metaJson is already a JSON object or value; include it under the "meta" key
+            return "{\"sourceUrl\":" + srcJson + ",\"meta\":" + metaJson + "}";
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"Failed to build userData JSON: {ex.Message}");
+            return "";
+        }
+    }
+
+    // Create a ScriptableObject asset next to the imported file that stores source URL and metadata
+    private void CreateAndSaveMetadataSO(string assetPath, string sourceUrl)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(assetPath)) return;
+
+            var metaJson = GetMetadataUserData();
+
+            var so = ScriptableObject.CreateInstance<ArchiveImportedAssetData>();
+            so.sourceUrl = sourceUrl ?? "";
+            so.metadataJson = metaJson ?? "";
+            so.originalAssetPath = assetPath;
+
+            string soPath = System.IO.Path.ChangeExtension(assetPath, ".asset");
+
+            // If an existing SO exists, overwrite its fields and save
+            var existing = UnityEditor.AssetDatabase.LoadAssetAtPath<ArchiveImportedAssetData>(soPath);
+            if (existing != null)
+            {
+                existing.sourceUrl = so.sourceUrl;
+                existing.metadataJson = so.metadataJson;
+                existing.originalAssetPath = so.originalAssetPath;
+                UnityEditor.EditorUtility.SetDirty(existing);
+                UnityEditor.AssetDatabase.WriteImportSettingsIfDirty(soPath);
+            }
+            else
+            {
+                UnityEditor.AssetDatabase.CreateAsset(so, soPath);
+            }
+
+            UnityEditor.AssetDatabase.ImportAsset(soPath, ImportAssetOptions.ForceUpdate);
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"CreateAndSaveMetadataSO error for {assetPath}: {ex.Message}");
         }
     }
 
@@ -813,6 +1122,31 @@ public class ArchivesAccess : EditorWindow
             spriteRenderer.sprite = sprite;
             Undo.RegisterCreatedObjectUndo(imageGO, "Add Image Attachment");
             Debug.Log($"Attached image as SpriteRenderer: {filename} ({texture.width}x{texture.height})");
+            // Also attach any metadata SO next to the image as an ArchiveAssetReference on the parent
+            try
+            {
+                string soPath = System.IO.Path.ChangeExtension(assetPath, ".asset");
+                if (System.IO.File.Exists(soPath))
+                {
+                    var so = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(soPath);
+                    if (so != null)
+                    {
+                        var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
+                        Undo.RecordObject(assetRef, "Add Asset Reference");
+                        assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
+                        {
+                            assetPath = soPath,
+                            assetType = ".asset",
+                            assetObject = so
+                        });
+                        EditorUtility.SetDirty(assetRef);
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"Failed to attach metadata SO for {assetPath}: {ex.Message}");
+            }
         }
         else if (asset is VideoClip videoClip)
         {
