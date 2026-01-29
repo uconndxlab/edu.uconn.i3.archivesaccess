@@ -5,6 +5,7 @@ using System.Text.Json;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.UI;
 using UnityEngine.UIElements;
 using UnityEngine.Video;
 
@@ -301,11 +302,11 @@ public class AssetSelectionWindow : EditorWindow
         buttonContainer.style.justifyContent = Justify.FlexEnd;
         buttonContainer.style.marginTop = 10;
 
-        var cancelButton = new Button(() => Close()) { text = "Cancel" };
+        var cancelButton = new UnityEngine.UIElements.Button(() => Close()) { text = "Cancel" };
         cancelButton.style.marginRight = 5;
         buttonContainer.Add(cancelButton);
 
-        var importButton = new Button(OnImportClicked) { text = "Import Selected" };
+        var importButton = new UnityEngine.UIElements.Button(OnImportClicked) { text = "Import Selected" };
         buttonContainer.Add(importButton);
 
         root.Add(buttonContainer);
@@ -336,13 +337,28 @@ public class ArchivesAccess : EditorWindow
     public const string titleContentText = "Archives Access";
     MultiColumnListView _table;
     List<MetadataItem> _metadataItems = new List<MetadataItem>();
-    Button _generateButton;
+    UnityEngine.UIElements.Button _generateButton;
     // Store full API response including attachments
     JsonElement _apiResponse;
 
-    // Set to true to enable dev mode with demo URLs
-    public static bool DevMode = true;
+    // Automatically detect dev mode by checking if package is in local development
+    public static bool DevMode => IsLocalDevelopment();
 
+    private static bool IsLocalDevelopment()
+    {
+        // Check if .git folder exists in the package directory (indicates local development)
+        string packagePath = System.IO.Path.GetFullPath(
+            System.IO.Path.Combine(
+                UnityEngine.Application.dataPath,
+                "..",
+                "Packages",
+                "edu.uconn.i3.archivesaccess"
+            )
+        );
+        
+        string gitPath = System.IO.Path.Combine(packagePath, ".git");
+        return System.IO.Directory.Exists(gitPath);
+    }
 
     public string serverUrl = "https://archives-access-server.dxdev.core.uconn.edu/";
 
@@ -444,7 +460,7 @@ public class ArchivesAccess : EditorWindow
         bottomPane.Add(_table);
 
         // Footer button: Generate Asset
-        _generateButton = new Button(GenerateAsset)
+        _generateButton = new UnityEngine.UIElements.Button(GenerateAsset)
         {
             text = "Generate Asset"
         };
@@ -459,8 +475,25 @@ public class ArchivesAccess : EditorWindow
         rootVisualElement.style.paddingRight = 10;
         rootVisualElement.style.paddingTop = 10;
         rootVisualElement.style.paddingLeft = 10;
-
+        
         string selectedUrl = "";
+
+        // URL input
+        // Show text input field for URL in production mode
+        var urlInput = new TextField("Asset URL");
+        urlInput.style.marginBottom = 10;
+        urlInput.value = "https://collections.ctdigitalarchive.org/node/1686854"; // Example default URL
+
+        // Initialize selectedUrl with the default value
+        selectedUrl = urlInput.value;
+
+        urlInput.RegisterValueChangedCallback(evt =>
+        {
+            selectedUrl = evt.newValue.Trim();
+        });
+
+        topPane.Add(urlInput);
+
 
         if (DevMode)
         {
@@ -488,25 +521,8 @@ public class ArchivesAccess : EditorWindow
 
             topPane.Add(assetDropdown);
         }
-        else
-        {
-            // Show text input field for URL in production mode
-            var urlInput = new TextField("Asset URL");
-            urlInput.style.marginBottom = 10;
-            urlInput.value = "https://collections.ctdigitalarchive.org/node/1686854"; // Example default URL
-            
-            // Initialize selectedUrl with the default value
-            selectedUrl = urlInput.value;
 
-            urlInput.RegisterValueChangedCallback(evt =>
-            {
-                selectedUrl = evt.newValue.Trim();
-            });
-
-            topPane.Add(urlInput);
-        }
-
-        Button downloadButton = new Button(() =>
+        UnityEngine.UIElements.Button downloadButton = new UnityEngine.UIElements.Button(() =>
         {
             if (string.IsNullOrWhiteSpace(selectedUrl))
             {
@@ -1314,6 +1330,33 @@ public class ArchivesAccess : EditorWindow
         string filename = Path.GetFileNameWithoutExtension(assetPath);
         string extension = Path.GetExtension(assetPath).ToLowerInvariant();
 
+        // Always attach metadata SO for all asset types
+        try
+        {
+            string soPath = System.IO.Path.ChangeExtension(assetPath, ".asset");
+            if (System.IO.File.Exists(soPath))
+            {
+                var so = UnityEditor.AssetDatabase.LoadAssetAtPath<ArchiveImportedAssetData>(soPath);
+                if (so != null)
+                {
+                    var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
+                    Undo.RecordObject(assetRef, "Add Asset Reference");
+                    assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
+                    {
+                        assetPath = soPath,
+                        assetType = ".asset",
+                        assetObject = so
+                    });
+                    EditorUtility.SetDirty(assetRef);
+                    Debug.Log($"Attached metadata SO for {assetPath}");
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"Failed to attach metadata SO for {assetPath}: {ex.Message}");
+        }
+
         // Skip PDF files - they don't create GameObjects
         if (extension == ".pdf")
         {
@@ -1339,42 +1382,49 @@ public class ArchivesAccess : EditorWindow
             spriteRenderer.sprite = sprite;
             Undo.RegisterCreatedObjectUndo(imageGO, "Add Image Attachment");
             Debug.Log($"Attached image as SpriteRenderer: {filename} ({texture.width}x{texture.height})");
-            // Also attach any metadata SO next to the image as an ArchiveAssetReference on the parent
-            try
-            {
-                string soPath = System.IO.Path.ChangeExtension(assetPath, ".asset");
-                if (System.IO.File.Exists(soPath))
-                {
-                    var so = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(soPath);
-                    if (so != null)
-                    {
-                        var assetRef = parent.GetComponent<ArchiveAssetReference>() ?? parent.AddComponent<ArchiveAssetReference>();
-                        Undo.RecordObject(assetRef, "Add Asset Reference");
-                        assetRef.attachments.Add(new ArchiveAssetReference.AssetReference
-                        {
-                            assetPath = soPath,
-                            assetType = ".asset",
-                            assetObject = so
-                        });
-                        EditorUtility.SetDirty(assetRef);
-                    }
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning($"Failed to attach metadata SO for {assetPath}: {ex.Message}");
-            }
+            
+            // Focus camera on the created image
+            Selection.activeGameObject = imageGO;
+            SceneView.FrameLastActiveSceneView();
         }
         else if (asset is VideoClip videoClip)
         {
-            var videoGO = new GameObject($"Video: {filename}");
-            videoGO.transform.SetParent(parent.transform);
-            videoGO.transform.localPosition = Vector3.zero;
-            var videoPlayer = videoGO.AddComponent<UnityEngine.Video.VideoPlayer>();
+            // Create Canvas GameObject
+            var canvasGO = new GameObject($"Video: {filename}");
+            canvasGO.transform.SetParent(parent.transform);
+            canvasGO.transform.localPosition = Vector3.zero;
+            
+            var canvas = canvasGO.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            
+            var canvasScaler = canvasGO.AddComponent<CanvasScaler>();
+            canvasScaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            
+            // Create RawImage within the canvas
+            var rawImageGO = new GameObject("RawImage");
+            rawImageGO.transform.SetParent(canvasGO.transform);
+            rawImageGO.transform.localPosition = Vector3.zero;
+            
+            var rawImage = rawImageGO.AddComponent<RawImage>();
+            var rectTransform = rawImageGO.GetComponent<RectTransform>();
+            rectTransform.anchorMin = Vector2.zero;
+            rectTransform.anchorMax = Vector2.one;
+            rectTransform.offsetMin = Vector2.zero;
+            rectTransform.offsetMax = Vector2.zero;
+            
+            // Create VideoPlayer on the canvas
+            var videoPlayer = canvasGO.AddComponent<UnityEngine.Video.VideoPlayer>();
             videoPlayer.clip = videoClip;
-            videoPlayer.playOnAwake = false;
-            Undo.RegisterCreatedObjectUndo(videoGO, "Add Video Attachment");
-            Debug.Log($"Attached video as VideoPlayer: {filename}");
+            videoPlayer.playOnAwake = true;
+            videoPlayer.targetTexture = new RenderTexture(1920, 1080, 24);
+            rawImage.texture = videoPlayer.targetTexture;
+            
+            Undo.RegisterCreatedObjectUndo(canvasGO, "Add Video Attachment");
+            Debug.Log($"Attached video as VideoPlayer with Canvas: {filename}");
+            
+            // Focus camera on the created video canvas
+            Selection.activeGameObject = canvasGO;
+            SceneView.FrameLastActiveSceneView();
         }
         else if (asset is AudioClip audioClip)
         {
@@ -1382,6 +1432,10 @@ public class ArchivesAccess : EditorWindow
             audioSource.clip = audioClip;
             audioSource.playOnAwake = false;
             Debug.Log($"Attached audio as AudioSource: {filename} (length: {audioClip.length}s)");
+            
+            // Focus camera on the parent GameObject (audio has no visual child)
+            Selection.activeGameObject = parent;
+            SceneView.FrameLastActiveSceneView();
         }
         else
         {
@@ -1395,6 +1449,10 @@ public class ArchivesAccess : EditorWindow
             });
             EditorUtility.SetDirty(parent);
             Debug.Log($"Stored reference for asset type {extension}: {filename}");
+            
+            // Focus camera on the parent GameObject
+            Selection.activeGameObject = parent;
+            SceneView.FrameLastActiveSceneView();
         }
     }
 
