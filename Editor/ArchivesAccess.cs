@@ -341,7 +341,7 @@ public class ArchivesAccess : EditorWindow
     JsonElement _apiResponse;
 
     // Set to true to enable dev mode with demo URLs
-    private static bool DevMode = false;
+    public static bool DevMode = true;
 
 
     public string serverUrl = "https://archives-access-server.dxdev.core.uconn.edu/";
@@ -467,7 +467,8 @@ public class ArchivesAccess : EditorWindow
             // Show demo URLs dropdown in dev mode
             var exampleUrls = new Dictionary<string, string>
             {
-                { "Use PDF Demo URL", "https://collections.ctdigitalarchive.org/node/144961" },
+                { "Use Large PDF Demo URL", "https://collections.ctdigitalarchive.org/node/144961" },
+                { "Use Small PDF Demo URL", "https://collections.ctdigitalarchive.org/node/323508" },
                 { "Use Image Demo URL", "https://collections.ctdigitalarchive.org/node/947297" },
                 { "Use Video Demo URL", "https://collections.ctdigitalarchive.org/node/745225" },
                 { "Use Audio Demo URL", "https://collections.ctdigitalarchive.org/node/2316120" }
