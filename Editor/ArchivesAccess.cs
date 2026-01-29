@@ -8,9 +8,80 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using UnityEngine.Video;
 
+
+[System.Serializable]
+public class ArchiveImportedAssetData : ScriptableObject
+{
+    private string _sourceUrl = "";
+    private string _metadataJson = "";
+    private string _originalAssetPath = "";
+    public List<MetadataEntry> metadataEntries = new List<MetadataEntry>();
+
+    public string OriginalAssetPath
+    {
+        get { return _originalAssetPath; }
+        set { _originalAssetPath = value; }
+    }
+
+    [System.Serializable]
+    public class MetadataEntry
+    {
+        public string key;
+        public string value;
+    }
+
+    public string SourceUrl
+    {
+        get { return _sourceUrl; }
+        set { _sourceUrl = value; }
+    }
+
+    public string MetadataJson
+    {
+        get { return _metadataJson; }
+        set { _metadataJson = value; }
+    }
+
+    public void ParseMetadata()
+    {
+        metadataEntries.Clear();
+        if (string.IsNullOrEmpty(MetadataJson)) return;
+
+        try
+        {
+            using (var doc = JsonDocument.Parse(MetadataJson))
+            {
+                foreach (var property in doc.RootElement.EnumerateObject())
+                {
+                    string val = "";
+                    if (property.Value.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var item in property.Value.EnumerateArray())
+                        {
+                            val += item.ToString() + "\n";
+                        }
+                    }
+                    else
+                    {
+                        val = property.Value.ToString();
+                    }
+
+                    metadataEntries.Add(new MetadataEntry { key = property.Name, value = val });
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogWarning($"Failed to parse metadata JSON: {ex.Message}");
+        }
+    }
+}
+
 // Component to hold references to archive assets
 public class ArchiveAssetReference : MonoBehaviour
 {
+
+
     [System.Serializable]
     public class AssetReference
     {
@@ -20,7 +91,97 @@ public class ArchiveAssetReference : MonoBehaviour
     }
     
     public List<AssetReference> attachments = new List<AssetReference>();
+
+
 }
+
+#if UNITY_EDITOR
+[CustomEditor(typeof(ArchiveAssetReference))]
+public class ArchiveAssetReferenceEditor : Editor
+{
+    private string _hoveredEntryKey = null;
+
+    public override void OnInspectorGUI()
+    {
+        ArchiveAssetReference archiveRef = (ArchiveAssetReference)target;
+
+        EditorGUILayout.LabelField("Archive Asset Attachments", EditorStyles.boldLabel);
+        EditorGUILayout.Space(5);
+
+        if (archiveRef.attachments.Count == 0)
+        {
+            EditorGUILayout.HelpBox("No attachments. Import an asset to add metadata.", MessageType.Info);
+            return;
+        }
+
+        for (int i = 0; i < archiveRef.attachments.Count; i++)
+        {
+            var attachment = archiveRef.attachments[i];
+            EditorGUILayout.LabelField($"Attachment {i + 1}: {attachment.assetType}", EditorStyles.boldLabel);
+            EditorGUILayout.TextField("Path", attachment.assetPath);
+
+            // Try to load metadata SO if it's an asset file
+            if (attachment.assetType == ".asset" && attachment.assetObject is ArchiveImportedAssetData metadataSO)
+            {
+                EditorGUILayout.Space(3);
+                EditorGUILayout.LabelField("Metadata", EditorStyles.boldLabel);
+
+                if (metadataSO.metadataEntries.Count > 0)
+                {
+                    foreach (var entry in metadataSO.metadataEntries)
+                    {
+                        EditorGUILayout.LabelField(entry.key, EditorStyles.boldLabel);
+                        
+                        // Create a rect for the text area
+                        Rect textAreaRect = EditorGUILayout.GetControlRect(GUILayout.Height(30));
+                        
+                        // Check if mouse is hovering over this text area
+                        bool isHovered = textAreaRect.Contains(Event.current.mousePosition);
+                        if (isHovered)
+                        {
+                            _hoveredEntryKey = entry.key;
+                        }
+                        
+                        // Check if clicked
+                        if (Event.current.type == EventType.MouseDown && textAreaRect.Contains(Event.current.mousePosition))
+                        {
+                            GUIUtility.systemCopyBuffer = entry.value;
+                            Debug.Log($"Copied to clipboard: {entry.key}");
+                            
+                            // Show brief toast notification
+                            EditorUtility.DisplayProgressBar("", "✓ Copied to clipboard", 0.5f);
+                            System.Threading.Tasks.Task.Delay(750).ContinueWith(_ => EditorUtility.ClearProgressBar(), 
+                                System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
+                        }
+                        
+                        // Draw text area
+                        EditorGUI.TextArea(textAreaRect, entry.value);
+                        
+                        // Draw copy icon in upper right corner if hovering
+                        if (isHovered)
+                        {
+                            var iconRect = new Rect(textAreaRect.xMax - 25, textAreaRect.yMin + 3, 20, 20);
+                            var copyIcon = EditorGUIUtility.IconContent("Clipboard");
+                            
+                            if (GUI.Button(iconRect, copyIcon, GUIStyle.none))
+                            {
+                                GUIUtility.systemCopyBuffer = entry.value;
+                                Debug.Log($"Copied to clipboard: {entry.key}");
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox("No metadata entries parsed. Metadata SO may not have been parsed yet.", MessageType.Info);
+                }
+            }
+
+            EditorGUILayout.Space(10);
+        }
+    }
+}
+#endif
 
 public class AssetSelectionWindow : EditorWindow
 {
@@ -29,6 +190,7 @@ public class AssetSelectionWindow : EditorWindow
     private string _apiUrl;
     private System.Action<string, string, string, string, int> _onAssetSelected;
     private ListView _listView;
+
 
     public class AttachmentInfo
     {
@@ -175,9 +337,23 @@ public class ArchivesAccess : EditorWindow
     MultiColumnListView _table;
     List<MetadataItem> _metadataItems = new List<MetadataItem>();
     Button _generateButton;
-    JsonElement _apiResponse; // Store full API response including attachments
+    // Store full API response including attachments
+    JsonElement _apiResponse;
 
-    string apiUrl = "http://127.0.0.1:8000/api/";
+    // Set to true to enable dev mode with demo URLs
+    private static bool DevMode = false;
+
+
+    public string serverUrl = "https://archives-access-server.dxdev.core.uconn.edu/";
+
+    public string apiUrl => GetApiUrl();
+
+    private string GetApiUrl()
+    {
+        // Remove trailing slash from serverUrl and append /api/
+        string url = serverUrl.TrimEnd('/');
+        return url + "/api/";
+    }
 
     public class MetadataItem
     {
@@ -279,31 +455,64 @@ public class ArchivesAccess : EditorWindow
 
         splitView.Add(bottomPane);
 
-        // Example URLs for different content types
-        var exampleUrls = new Dictionary<string, string>
-        {
-            { "Use PDF Demo URL", "https://collections.ctdigitalarchive.org/node/144961" },
-            { "Use Image Demo URL", "https://collections.ctdigitalarchive.org/node/947297" },
-            { "Use Video Demo URL", "https://collections.ctdigitalarchive.org/node/745225" },
-            { "Use Audio Demo URL", "https://collections.ctdigitalarchive.org/node/2316120" }
-        };
+        rootVisualElement.style.paddingBottom = 10;
+        rootVisualElement.style.paddingRight = 10;
+        rootVisualElement.style.paddingTop = 10;
+        rootVisualElement.style.paddingLeft = 10;
 
-        // Create dropdown for asset selection
-        var assetDropdown = new DropdownField("Asset URL", 
-            exampleUrls.Keys.ToList(),
-            "Use Image Demo URL");
-        assetDropdown.style.marginBottom = 10;
+        string selectedUrl = "";
 
-        // Store the selected URL
-        string selectedUrl = exampleUrls["Use Image Demo URL"];
-        assetDropdown.RegisterValueChangedCallback(evt =>
+        if (DevMode)
         {
-            selectedUrl = exampleUrls[evt.newValue];
-            Debug.Log($"Selected {evt.newValue}: {selectedUrl}");
-        });
+            // Show demo URLs dropdown in dev mode
+            var exampleUrls = new Dictionary<string, string>
+            {
+                { "Use PDF Demo URL", "https://collections.ctdigitalarchive.org/node/144961" },
+                { "Use Image Demo URL", "https://collections.ctdigitalarchive.org/node/947297" },
+                { "Use Video Demo URL", "https://collections.ctdigitalarchive.org/node/745225" },
+                { "Use Audio Demo URL", "https://collections.ctdigitalarchive.org/node/2316120" }
+            };
+
+            var assetDropdown = new DropdownField("Asset URL", 
+                exampleUrls.Keys.ToList(),
+                "Use Image Demo URL");
+            assetDropdown.style.marginBottom = 10;
+
+            selectedUrl = exampleUrls["Use Image Demo URL"];
+            assetDropdown.RegisterValueChangedCallback(evt =>
+            {
+                selectedUrl = exampleUrls[evt.newValue];
+                Debug.Log($"Selected {evt.newValue}: {selectedUrl}");
+            });
+
+            topPane.Add(assetDropdown);
+        }
+        else
+        {
+            // Show text input field for URL in production mode
+            var urlInput = new TextField("Asset URL");
+            urlInput.style.marginBottom = 10;
+            urlInput.value = "https://collections.ctdigitalarchive.org/node/1686854"; // Example default URL
+            
+            // Initialize selectedUrl with the default value
+            selectedUrl = urlInput.value;
+
+            urlInput.RegisterValueChangedCallback(evt =>
+            {
+                selectedUrl = evt.newValue.Trim();
+            });
+
+            topPane.Add(urlInput);
+        }
 
         Button downloadButton = new Button(() =>
         {
+            if (string.IsNullOrWhiteSpace(selectedUrl))
+            {
+                EditorUtility.DisplayDialog("Invalid URL", "Please enter a valid URL.", "OK");
+                return;
+            }
+
             Debug.Log("Button pressed!");
             string fetchEndpoint = apiUrl + "parse?url=" + selectedUrl.Trim();
             Debug.Log("Fetching data from API: " + fetchEndpoint);
@@ -376,11 +585,6 @@ public class ArchivesAccess : EditorWindow
         })
         { text = "Fetch Asset" };
 
-        rootVisualElement.style.paddingBottom = 10;
-        rootVisualElement.style.paddingRight = 10;
-        rootVisualElement.style.paddingTop = 10;
-        rootVisualElement.style.paddingLeft = 10;
-        topPane.Add(assetDropdown);
         topPane.Add(downloadButton);
     }
 
@@ -895,37 +1099,49 @@ public class ArchivesAccess : EditorWindow
     {
         try
         {
-            if (string.IsNullOrEmpty(assetPath)) return;
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                Debug.LogWarning("CreateAndSaveMetadataSO: assetPath is empty");
+                return;
+            }
 
             var metaJson = GetMetadataUserData();
+            Debug.Log($"CreateAndSaveMetadataSO: Creating SO for {assetPath}, metadata length: {metaJson?.Length ?? 0}");
 
             var so = ScriptableObject.CreateInstance<ArchiveImportedAssetData>();
-            so.sourceUrl = sourceUrl ?? "";
-            so.metadataJson = metaJson ?? "";
-            so.originalAssetPath = assetPath;
+            so.SourceUrl = sourceUrl ?? "";
+            so.MetadataJson = metaJson ?? "";
+            so.OriginalAssetPath = assetPath;
 
             string soPath = System.IO.Path.ChangeExtension(assetPath, ".asset");
+            Debug.Log($"CreateAndSaveMetadataSO: SO path will be: {soPath}");
 
             // If an existing SO exists, overwrite its fields and save
             var existing = UnityEditor.AssetDatabase.LoadAssetAtPath<ArchiveImportedAssetData>(soPath);
             if (existing != null)
             {
-                existing.sourceUrl = so.sourceUrl;
-                existing.metadataJson = so.metadataJson;
-                existing.originalAssetPath = so.originalAssetPath;
+                Debug.Log($"CreateAndSaveMetadataSO: Updating existing SO at {soPath}");
+                existing.SourceUrl = so.SourceUrl;
+                existing.MetadataJson = so.MetadataJson;
+                existing.OriginalAssetPath = so.OriginalAssetPath;
+                existing.ParseMetadata();
                 UnityEditor.EditorUtility.SetDirty(existing);
-                UnityEditor.AssetDatabase.WriteImportSettingsIfDirty(soPath);
+                UnityEditor.AssetDatabase.SaveAssets();
             }
             else
             {
+                Debug.Log($"CreateAndSaveMetadataSO: Creating new SO at {soPath}");
+                so.ParseMetadata();
                 UnityEditor.AssetDatabase.CreateAsset(so, soPath);
+                UnityEditor.AssetDatabase.SaveAssets();
             }
 
             UnityEditor.AssetDatabase.ImportAsset(soPath, ImportAssetOptions.ForceUpdate);
+            Debug.Log($"CreateAndSaveMetadataSO: Successfully saved SO at {soPath}");
         }
         catch (System.Exception ex)
         {
-            Debug.LogWarning($"CreateAndSaveMetadataSO error for {assetPath}: {ex.Message}");
+            Debug.LogWarning($"CreateAndSaveMetadataSO error for {assetPath}: {ex.Message}\n{ex.StackTrace}");
         }
     }
 

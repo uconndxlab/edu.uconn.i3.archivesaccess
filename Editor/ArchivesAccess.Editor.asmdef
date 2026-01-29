@@ -1,7 +1,9 @@
 {
     "name": "ArchivesAccess.Editor",
     "rootNamespace": "",
-    "references": [],
+    "references": [
+        "ArchivesAccess.Runtime"
+    ],
     "includePlatforms": [
         "Editor"
     ],
