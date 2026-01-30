@@ -1,7 +1,8 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
-using System.Text.Json;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -50,25 +51,23 @@ public class ArchiveImportedAssetData : ScriptableObject
 
         try
         {
-            using (var doc = JsonDocument.Parse(MetadataJson))
+            var obj = JObject.Parse(MetadataJson);
+            foreach (var property in obj.Properties())
             {
-                foreach (var property in doc.RootElement.EnumerateObject())
+                string val = "";
+                if (property.Value is JArray arr)
                 {
-                    string val = "";
-                    if (property.Value.ValueKind == JsonValueKind.Array)
+                    foreach (var item in arr)
                     {
-                        foreach (var item in property.Value.EnumerateArray())
-                        {
-                            val += item.ToString() + "\n";
-                        }
+                        val += item.ToString() + "\n";
                     }
-                    else
-                    {
-                        val = property.Value.ToString();
-                    }
-
-                    metadataEntries.Add(new MetadataEntry { key = property.Name, value = val });
                 }
+                else
+                {
+                    val = property.Value.ToString();
+                }
+
+                metadataEntries.Add(new MetadataEntry { key = property.Name, value = val });
             }
         }
         catch (System.Exception ex)
@@ -339,7 +338,7 @@ public class ArchivesAccess : EditorWindow
     List<MetadataItem> _metadataItems = new List<MetadataItem>();
     UnityEngine.UIElements.Button _generateButton;
     // Store full API response including attachments
-    JsonElement _apiResponse;
+    JToken _apiResponse;
 
     // Automatically detect dev mode by checking if package is in local development
     public static bool DevMode => IsLocalDevelopment();
@@ -548,37 +547,36 @@ public class ArchivesAccess : EditorWindow
 
                     _metadataItems.Clear();
                     
-                    // Parse the JSON response using System.Text.Json
+                    // Parse the JSON response using Newtonsoft.Json
                     try
                     {
-                        using (var doc = JsonDocument.Parse(task.Result))
+                        _apiResponse = JToken.Parse(task.Result); // Store for later use in GenerateAsset
+                        
+                        var data = _apiResponse["data"];
+                        var metaData = data?["meta"];
+                        
+                        if (metaData != null && metaData is JObject metaObj)
                         {
-                            _apiResponse = doc.RootElement.Clone(); // Store for later use in GenerateAsset
-                            
-                            if (doc.RootElement.TryGetProperty("data", out var data) &&
-                                data.TryGetProperty("meta", out var metaData))
+                            foreach (var property in metaObj.Properties())
                             {
-                                foreach (var property in metaData.EnumerateObject())
+                                var val = "";
+                                if (property.Value is JArray arr)
                                 {
-                                    var val = "";
-                                    if (property.Value.ValueKind == JsonValueKind.Array)
+                                    foreach (var item in arr)
                                     {
-                                        foreach (var item in property.Value.EnumerateArray())
-                                        {
-                                            val += item.ToString() + "\n";
-                                        }
+                                        val += item.ToString() + "\n";
                                     }
-                                    else
-                                    {
-                                        val = property.Value.ToString();
-                                    }
-
-                                    _metadataItems.Add(new MetadataItem 
-                                    { 
-                                        PropertyName = property.Name, 
-                                        PropertyValue = val 
-                                    });
                                 }
+                                else
+                                {
+                                    val = property.Value.ToString();
+                                }
+
+                                _metadataItems.Add(new MetadataItem 
+                                { 
+                                    PropertyName = property.Name, 
+                                    PropertyValue = val 
+                                });
                             }
                         }
                     }
@@ -650,26 +648,27 @@ public class ArchivesAccess : EditorWindow
             }
 
             // Collect attachment info and show selection window
-            if (_apiResponse.ValueKind != JsonValueKind.Undefined &&
-                _apiResponse.TryGetProperty("data", out var data) &&
-                data.TryGetProperty("attachments", out var attachments) &&
-                attachments.ValueKind == JsonValueKind.Array)
+            var data = _apiResponse?["data"];
+            var attachments = data?["attachments"] as JArray;
+            
+            if (attachments != null && attachments.Count > 0)
             {
                 var attachmentList = new List<AssetSelectionWindow.AttachmentInfo>();
                 
                 int i = 0;
-                foreach (var attachment in attachments.EnumerateArray())
+                foreach (var attachment in attachments)
                 {
-                    string url = attachment.TryGetProperty("url", out var urlProp) ? urlProp.GetString() : "";
-                    string title = attachment.TryGetProperty("title", out var titleProp) ? titleProp.GetString() : $"Attachment_{i}";
+                    string url = attachment["url"]?.ToString() ?? "";
+                    string title = attachment["title"]?.ToString() ?? $"Attachment_{i}";
                     
                     string mimeType = "application/octet-stream";
-                    if (attachment.TryGetProperty("type", out var typeArray) && typeArray.ValueKind == JsonValueKind.Array)
+                    var typeArray = attachment["type"] as JArray;
+                    if (typeArray != null && typeArray.Count > 0)
                     {
                         var parts = new List<string>();
-                        foreach (var item in typeArray.EnumerateArray())
+                        foreach (var item in typeArray)
                         {
-                            parts.Add(item.GetString() ?? "");
+                            parts.Add(item.ToString());
                         }
                         mimeType = string.Join("/", parts);
                     }
@@ -688,7 +687,8 @@ public class ArchivesAccess : EditorWindow
                 }
                 // If the API returned a set of individual images for this PDF, offer a special
                 // "PDF as Images" import option that will download each image separately.
-                if (data.TryGetProperty("images", out var imagesProp) && imagesProp.ValueKind == JsonValueKind.Array && imagesProp.GetArrayLength() > 0)
+                var imagesProp = data?["images"] as JArray;
+                if (imagesProp != null && imagesProp.Count > 0)
                 {
                     // Insert at front so it's visible as a primary option
                     attachmentList.Insert(0, new AssetSelectionWindow.AttachmentInfo
@@ -919,11 +919,13 @@ public class ArchivesAccess : EditorWindow
         var savedPaths = new List<string>();
         try
         {
-            if (_apiResponse.ValueKind == JsonValueKind.Undefined) return savedPaths;
-            if (!_apiResponse.TryGetProperty("data", out var data)) return savedPaths;
-            if (!data.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array) return savedPaths;
+            if (_apiResponse == null) return savedPaths;
+            var data = _apiResponse["data"];
+            if (data == null) return savedPaths;
+            var images = data["images"] as JArray;
+            if (images == null) return savedPaths;
 
-            int count = images.GetArrayLength();
+            int count = images.Count;
             if (count == 0) return savedPaths;
 
             int pad = 4; // zero-pad to 4 digits: 0001, 0002, ...
@@ -944,46 +946,46 @@ public class ArchivesAccess : EditorWindow
             using (var client = new System.Net.Http.HttpClient())
             {
                 int idx = 0;
-                foreach (var img in images.EnumerateArray())
+                foreach (var img in images)
                 {
                     idx++;
                     string imageUrl = null;
 
                     // Primary: if the image entry is a string, use it
-                    if (img.ValueKind == JsonValueKind.String)
+                    if (img.Type == JTokenType.String)
                     {
-                        imageUrl = img.GetString();
+                        imageUrl = img.ToString();
                     }
-                    else if (img.ValueKind == JsonValueKind.Object)
+                    else if (img is JObject imgObj)
                     {
                         // Preferred nested path: data.images[].images[0].resource.@id
-                        if (img.TryGetProperty("images", out var innerImages) && innerImages.ValueKind == JsonValueKind.Array && innerImages.GetArrayLength() > 0)
+                        var innerImages = imgObj["images"] as JArray;
+                        if (innerImages != null && innerImages.Count > 0)
                         {
                             var first = innerImages[0];
-                            if (first.ValueKind == JsonValueKind.Object)
+                            if (first is JObject firstObj)
                             {
-                                if (first.TryGetProperty("resource", out var resource) && resource.ValueKind == JsonValueKind.Object)
+                                var resource = firstObj["resource"] as JObject;
+                                if (resource != null)
                                 {
-                                    if (resource.TryGetProperty("@id", out var idProp) && idProp.ValueKind == JsonValueKind.String)
-                                    {
-                                        imageUrl = idProp.GetString();
-                                    }
+                                    imageUrl = resource["@id"]?.ToString();
                                 }
 
                                 // Fallback: first.images[0] may contain a direct "url" field
-                                if (string.IsNullOrEmpty(imageUrl) && first.TryGetProperty("url", out var urlProp) && urlProp.ValueKind == JsonValueKind.String)
+                                if (string.IsNullOrEmpty(imageUrl))
                                 {
-                                    imageUrl = urlProp.GetString();
+                                    imageUrl = firstObj["url"]?.ToString();
                                 }
                             }
                         }
 
                         // Secondary fallback: entry may have a top-level resource.@id
-                        if (string.IsNullOrEmpty(imageUrl) && img.TryGetProperty("resource", out var topResource) && topResource.ValueKind == JsonValueKind.Object)
+                        if (string.IsNullOrEmpty(imageUrl))
                         {
-                            if (topResource.TryGetProperty("@id", out var topId) && topId.ValueKind == JsonValueKind.String)
+                            var topResource = imgObj["resource"] as JObject;
+                            if (topResource != null)
                             {
-                                imageUrl = topId.GetString();
+                                imageUrl = topResource["@id"]?.ToString();
                             }
                         }
                     }
@@ -1064,19 +1066,21 @@ public class ArchivesAccess : EditorWindow
     {
         try
         {
-            if (_apiResponse.ValueKind != JsonValueKind.Undefined && _apiResponse.TryGetProperty("data", out var data))
+            if (_apiResponse != null)
             {
-                if (data.TryGetProperty("meta", out var meta))
+                var data = _apiResponse["data"];
+                if (data != null)
                 {
-                    return meta.GetRawText();
+                    var meta = data["meta"];
+                    if (meta != null)
+                    {
+                        return meta.ToString(Formatting.None);
+                    }
+                    // If no meta object, store the whole `data` block
+                    return data.ToString(Formatting.None);
                 }
-                // If no meta object, store the whole `data` block
-                return data.GetRawText();
-            }
 
-            if (_apiResponse.ValueKind != JsonValueKind.Undefined)
-            {
-                return _apiResponse.GetRawText();
+                return _apiResponse.ToString(Formatting.None);
             }
         }
         catch (System.Exception ex)
@@ -1094,7 +1098,7 @@ public class ArchivesAccess : EditorWindow
         {
             var metaJson = GetMetadataUserData();
             // Serialize sourceUrl safely
-            var srcJson = System.Text.Json.JsonSerializer.Serialize(sourceUrl ?? "");
+            var srcJson = JsonConvert.SerializeObject(sourceUrl ?? "");
 
             if (string.IsNullOrEmpty(metaJson))
             {
